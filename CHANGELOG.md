@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.85.3](https://github.com/kunchenguid/no-mistakes/compare/v1.85.2...v1.85.3) (2026-09-29)
+
+
+### Bug Fixes
+
+* **gate:** credit recovery anchors when reconciling private mirror branches ([#1236](https://github.com/kunchenguid/no-mistakes/issues/1236)) ([bff2d06](https://github.com/kunchenguid/no-mistakes/commit/bff2d06f8019720dceb8529fef1f04acf3af4d44))
+
 ## [1.85.2](https://github.com/kunchenguid/no-mistakes/compare/v1.85.1...v1.85.2) (2026-09-29)
 
 
