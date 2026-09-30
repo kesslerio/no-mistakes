@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -95,72 +97,112 @@ func parkCustodyRun(t *testing.T, m *RunManager, p *ipc.CustodyOperationParams) 
 
 func TestCustodyManagerReboundPublicationCanReleaseAndReconcile(t *testing.T) {
 	for _, action := range []string{"release", "reconcile"} {
-		t.Run(action, func(t *testing.T) {
-			m, p, remote := custodyManagerFixture(t)
-			stop := parkCustodyRun(t, m, p)
-			if _, err := m.HandleCustodyOperation(context.Background(), p); err != nil {
-				t.Fatal(err)
-			}
-			// Publish the rebound head, then finish the executor before release.
-			gitCmd(t, p.WorkDir, "push", remote, p.HeadSHA+":refs/heads/existing")
-			if err := m.db.UpdateRunPublication(p.RunID, db.PushBinding{
-				HeadSHA: p.HeadSHA, TargetKind: "upstream", TargetFingerprint: branchsync.TargetFingerprint(remote), Ref: "refs/heads/existing",
-			}); err != nil {
-				t.Fatal(err)
-			}
-			stop()
-			delete(m.executors, p.RunID)
-			status := types.RunCompleted
-			message := ""
-			if action == "reconcile" {
-				status, message = types.RunFailed, "daemon crashed during execution"
-			}
-			if err := m.db.UpdateRunErrorStatusWithVerifiedHead(p.RunID, message, status, p.HeadSHA); err != nil {
-				t.Fatal(err)
-			}
-			before, _ := m.db.GetRun(p.RunID)
-			// The source branch has no public ref or PR. Both provider reads must
-			// use the rebound destination recorded by the supported rebind call.
-			calls := 0
-			m.publicationPR = func(_ context.Context, _ *db.Repo, _ *db.Run, _ string, branch string) (*scm.PR, error) {
-				calls++
-				if branch != "existing" {
-					return nil, os.ErrNotExist
+		for _, scenario := range []string{"recorded-pr", "replacement-pr", "replacement-after-archive"} {
+			t.Run(action+"/"+scenario, func(t *testing.T) {
+				m, p, remote := custodyManagerFixture(t)
+				stop := parkCustodyRun(t, m, p)
+				if _, err := m.HandleCustodyOperation(context.Background(), p); err != nil {
+					t.Fatal(err)
 				}
-				return &scm.PR{URL: *before.PRURL, HeadSHA: p.HeadSHA}, nil
-			}
-			// Restore a stale custody lane while retaining its old head in an archive.
-			gitCmd(t, m.paths.RepoDir(p.RepoID), "update-ref", "refs/heads/validation", before.BaseSHA)
-			p.Action = action
-			result, err := m.HandleCustodyOperation(context.Background(), p)
-			if err != nil {
-				t.Fatal(err)
-			}
-			after, _ := m.db.GetRun(p.RunID)
-			if result.State != "released" || result.Branch != "validation" || calls != 2 || after.CustodyReturnedAt == nil {
-				t.Fatalf("release result=%+v run=%+v provider calls=%d", result, after, calls)
-			}
-			if after.Branch != before.Branch || after.PublishBranch() != before.PublishBranch() || after.HeadSHA != before.HeadSHA || *after.LastPushedSHA != *before.LastPushedSHA || *after.PushRef != *before.PushRef || *after.PushGeneration != *before.PushGeneration || after.Status != before.Status {
-				t.Fatalf("release changed provenance: before=%+v after=%+v", before, after)
-			}
-			for _, head := range []string{p.HeadSHA, before.BaseSHA} {
-				if got := gitOutput(t, m.paths.RepoDir(p.RepoID), "rev-parse", "refs/no-mistakes/release/"+p.RunID+"/"+head); got != head {
-					t.Fatal("owned head was not archived")
+				// Publish the rebound head, then finish the executor before release.
+				gitCmd(t, p.WorkDir, "push", remote, p.HeadSHA+":refs/heads/existing")
+				if err := m.db.UpdateRunPublication(p.RunID, db.PushBinding{
+					HeadSHA: p.HeadSHA, TargetKind: "upstream", TargetFingerprint: branchsync.TargetFingerprint(remote), Ref: "refs/heads/existing",
+				}); err != nil {
+					t.Fatal(err)
 				}
-			}
-			if got := gitOutput(t, m.paths.RepoDir(p.RepoID), "rev-parse", "refs/heads/validation"); got != p.HeadSHA {
-				t.Fatal("source custody lane was not restored")
-			}
-			if got := gitOutput(t, remote, "rev-parse", "refs/heads/existing"); got != p.HeadSHA {
-				t.Fatal("published destination changed")
-			}
-			if got := gitOutput(t, p.WorkDir, "rev-parse", "HEAD"); got != p.HeadSHA {
-				t.Fatal("caller moved")
-			}
-			if _, err := m.HandleCustodyOperation(context.Background(), p); err != nil {
-				t.Fatalf("idempotent release: %v", err)
-			}
-		})
+				stop()
+				delete(m.executors, p.RunID)
+				status := types.RunCompleted
+				message := ""
+				if action == "reconcile" {
+					status, message = types.RunFailed, "daemon crashed during execution"
+				}
+				if err := m.db.UpdateRunErrorStatusWithVerifiedHead(p.RunID, message, status, p.HeadSHA); err != nil {
+					t.Fatal(err)
+				}
+				before, _ := m.db.GetRun(p.RunID)
+				// The source branch has no public ref or PR. Both provider reads must
+				// use the rebound destination recorded by the supported rebind call.
+				calls := 0
+				m.publicationPR = func(_ context.Context, _ *db.Repo, _ *db.Run, _ string, branch string) (*scm.PR, error) {
+					calls++
+					if branch != "existing" {
+						return nil, os.ErrNotExist
+					}
+					url := *before.PRURL
+					if scenario == "replacement-pr" || scenario == "replacement-after-archive" && calls > 1 {
+						url = "https://github.com/test/repo/pull/2"
+					}
+					return &scm.PR{URL: url, HeadSHA: p.HeadSHA}, nil
+				}
+				// Restore a stale custody lane while retaining its old head in an archive.
+				gitCmd(t, m.paths.RepoDir(p.RepoID), "update-ref", "refs/heads/validation", before.BaseSHA)
+				p.Action = action
+				result, err := m.HandleCustodyOperation(context.Background(), p)
+				if scenario != "recorded-pr" {
+					if err == nil || result != nil {
+						t.Fatalf("replacement PR accepted: result=%+v err=%v", result, err)
+					}
+					after, readErr := m.db.GetRun(p.RunID)
+					if readErr != nil || !reflect.DeepEqual(before, after) {
+						t.Fatalf("refusal changed run: before=%+v after=%+v err=%v", before, after, readErr)
+					}
+					if got := gitOutput(t, m.paths.RepoDir(p.RepoID), "rev-parse", "refs/heads/validation"); got != before.BaseSHA {
+						t.Fatal("refusal changed the custody lane")
+					}
+					if got := gitOutput(t, remote, "rev-parse", "refs/heads/existing"); got != p.HeadSHA {
+						t.Fatal("refusal changed the published destination")
+					}
+					if got := gitOutput(t, p.WorkDir, "rev-parse", "HEAD"); got != p.HeadSHA {
+						t.Fatal("refusal moved the caller")
+					}
+					if scenario == "replacement-pr" {
+						archives, listErr := git.Run(context.Background(), m.paths.RepoDir(p.RepoID), "for-each-ref", "--format=%(refname)", "refs/no-mistakes/release/")
+						if calls != 1 || listErr != nil || archives != "" {
+							t.Fatalf("replacement PR was not refused before archiving: calls=%d archives=%q err=%v", calls, archives, listErr)
+						}
+					} else {
+						if calls != 2 {
+							t.Fatalf("provider calls=%d, want initial proof and archive recheck", calls)
+						}
+						for _, head := range []string{p.HeadSHA, before.BaseSHA} {
+							if got := gitOutput(t, m.paths.RepoDir(p.RepoID), "rev-parse", "refs/no-mistakes/release/"+p.RunID+"/"+head); got != head {
+								t.Fatal("refusal lost an archived head")
+							}
+						}
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				after, _ := m.db.GetRun(p.RunID)
+				if result.State != "released" || result.Branch != "validation" || calls != 2 || after.CustodyReturnedAt == nil {
+					t.Fatalf("release result=%+v run=%+v provider calls=%d", result, after, calls)
+				}
+				if after.Branch != before.Branch || after.PublishBranch() != before.PublishBranch() || after.HeadSHA != before.HeadSHA || *after.LastPushedSHA != *before.LastPushedSHA || *after.PushRef != *before.PushRef || *after.PushGeneration != *before.PushGeneration || after.Status != before.Status {
+					t.Fatalf("release changed provenance: before=%+v after=%+v", before, after)
+				}
+				for _, head := range []string{p.HeadSHA, before.BaseSHA} {
+					if got := gitOutput(t, m.paths.RepoDir(p.RepoID), "rev-parse", "refs/no-mistakes/release/"+p.RunID+"/"+head); got != head {
+						t.Fatal("owned head was not archived")
+					}
+				}
+				if got := gitOutput(t, m.paths.RepoDir(p.RepoID), "rev-parse", "refs/heads/validation"); got != p.HeadSHA {
+					t.Fatal("source custody lane was not restored")
+				}
+				if got := gitOutput(t, remote, "rev-parse", "refs/heads/existing"); got != p.HeadSHA {
+					t.Fatal("published destination changed")
+				}
+				if got := gitOutput(t, p.WorkDir, "rev-parse", "HEAD"); got != p.HeadSHA {
+					t.Fatal("caller moved")
+				}
+				if _, err := m.HandleCustodyOperation(context.Background(), p); err != nil {
+					t.Fatalf("idempotent release: %v", err)
+				}
+			})
+		}
 	}
 }
 
@@ -219,6 +261,9 @@ func TestCustodyManagerPublicationRefusals(t *testing.T) {
 				m.executors[p.RunID] = pipeline.NewExecutor(m.db, m.paths, nil, nil, nil, nil)
 			case "dirty-release":
 				p.Action = "release"
+				if err := m.db.UpdateRunPRURL(p.RunID, "https://github.com/test/repo/pull/1"); err != nil {
+					t.Fatal(err)
+				}
 				if err := os.WriteFile(filepath.Join(p.WorkDir, "uncommitted"), []byte("work"), 0600); err != nil {
 					t.Fatal(err)
 				}
@@ -242,32 +287,63 @@ func TestCustodyManagerPublicationRefusals(t *testing.T) {
 
 func TestCustodyManagerReleaseAndReconcilePublishedRestart(t *testing.T) {
 	for _, action := range []string{"release", "reconcile"} {
-		t.Run(action, func(t *testing.T) {
-			m, p, remote := custodyManagerFixture(t)
-			p.Action = action
-			gitCmd(t, p.WorkDir, "push", remote, p.HeadSHA+":refs/heads/validation")
-			run, _ := m.db.GetRun(p.RunID)
-			if err := m.db.UpdateRunErrorStatusWithVerifiedHead(run.ID, "daemon crashed during execution", types.RunFailed, p.HeadSHA); err != nil {
-				t.Fatal(err)
-			}
-			m.publicationPR = func(context.Context, *db.Repo, *db.Run, string, string) (*scm.PR, error) {
-				return &scm.PR{URL: "https://github.com/test/repo/pull/1", HeadSHA: p.HeadSHA}, nil
-			}
-			result, err := m.HandleCustodyOperation(context.Background(), p)
-			if err != nil {
-				t.Fatal(err)
-			}
-			r, _ := m.db.GetRun(p.RunID)
-			if result.State != "released" || r.CustodyReturnedAt == nil || r.Error == nil || *r.Error != "daemon crashed during execution" || r.HeadSHA != p.HeadSHA {
-				t.Fatalf("lost restart history: %+v", r)
-			}
-			if got := gitOutput(t, remote, "rev-parse", "refs/heads/validation"); got != p.HeadSHA {
-				t.Fatal("published history changed")
-			}
-			if got := gitOutput(t, m.paths.RepoDir(p.RepoID), "rev-parse", "refs/no-mistakes/release/"+r.ID+"/"+p.HeadSHA); got != p.HeadSHA {
-				t.Fatal("archive missing")
-			}
-		})
+		for _, scenario := range []string{"recorded-pr", "replacement-pr", "missing-recorded-pr", "empty-recorded-pr"} {
+			t.Run(action+"/"+scenario, func(t *testing.T) {
+				m, p, remote := custodyManagerFixture(t)
+				p.Action = action
+				gitCmd(t, p.WorkDir, "push", remote, p.HeadSHA+":refs/heads/validation")
+				run, _ := m.db.GetRun(p.RunID)
+				if err := m.db.UpdateRunErrorStatusWithVerifiedHead(run.ID, "daemon crashed during execution", types.RunFailed, p.HeadSHA); err != nil {
+					t.Fatal(err)
+				}
+				if scenario != "missing-recorded-pr" {
+					url := "https://github.com/test/repo/pull/1"
+					if scenario == "empty-recorded-pr" {
+						url = ""
+					}
+					if err := m.db.UpdateRunPRURL(run.ID, url); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before, _ := m.db.GetRun(run.ID)
+				m.publicationPR = func(context.Context, *db.Repo, *db.Run, string, string) (*scm.PR, error) {
+					url := "https://github.com/test/repo/pull/1"
+					if scenario == "replacement-pr" {
+						url = "https://github.com/test/repo/pull/2"
+					}
+					return &scm.PR{URL: url, HeadSHA: p.HeadSHA}, nil
+				}
+				result, err := m.HandleCustodyOperation(context.Background(), p)
+				if scenario != "recorded-pr" {
+					if err == nil || result != nil {
+						t.Fatalf("unbound PR accepted: result=%+v err=%v", result, err)
+					}
+					after, readErr := m.db.GetRun(run.ID)
+					if readErr != nil || !reflect.DeepEqual(before, after) {
+						t.Fatalf("refusal changed run: before=%+v after=%+v err=%v", before, after, readErr)
+					}
+					for _, dir := range []string{p.WorkDir, remote, m.paths.RepoDir(p.RepoID)} {
+						if got := gitOutput(t, dir, "rev-parse", "refs/heads/validation"); got != p.HeadSHA {
+							t.Fatal("refusal moved a branch")
+						}
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				r, _ := m.db.GetRun(p.RunID)
+				if result.State != "released" || r.CustodyReturnedAt == nil || r.Error == nil || *r.Error != "daemon crashed during execution" || r.HeadSHA != p.HeadSHA {
+					t.Fatalf("lost restart history: %+v", r)
+				}
+				if got := gitOutput(t, remote, "rev-parse", "refs/heads/validation"); got != p.HeadSHA {
+					t.Fatal("published history changed")
+				}
+				if got := gitOutput(t, m.paths.RepoDir(p.RepoID), "rev-parse", "refs/no-mistakes/release/"+r.ID+"/"+p.HeadSHA); got != p.HeadSHA {
+					t.Fatal("archive missing")
+				}
+			})
+		}
 	}
 }
 
@@ -313,6 +389,9 @@ func TestCustodyManagerRebindRefusesChangedGenerationOrProvider(t *testing.T) {
 func TestCustodyReleaseRefusesPRChangedWhileArchiving(t *testing.T) {
 	m, p, remote := custodyManagerFixture(t)
 	p.Action = "release"
+	if err := m.db.UpdateRunPRURL(p.RunID, "https://github.com/test/repo/pull/1"); err != nil {
+		t.Fatal(err)
+	}
 	gitCmd(t, p.WorkDir, "push", remote, p.HeadSHA+":refs/heads/validation")
 	calls := 0
 	m.publicationPR = func(context.Context, *db.Repo, *db.Run, string, string) (*scm.PR, error) {
@@ -326,6 +405,9 @@ func TestCustodyReleaseRefusesPRChangedWhileArchiving(t *testing.T) {
 	before := gitOutput(t, m.paths.RepoDir(p.RepoID), "rev-parse", "refs/heads/validation")
 	if _, err := m.HandleCustodyOperation(context.Background(), p); err == nil {
 		t.Fatal("changed PR identity accepted")
+	}
+	if calls != 2 {
+		t.Fatalf("provider calls=%d, want initial proof and archive recheck", calls)
 	}
 	r, _ := m.db.GetRun(p.RunID)
 	if r.CustodyReturnedAt != nil {

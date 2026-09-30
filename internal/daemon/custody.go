@@ -108,12 +108,15 @@ func (m *RunManager) HandleCustodyOperation(ctx context.Context, p *ipc.CustodyO
 			if err != nil {
 				return "", err
 			}
-			if pr == nil || pr.HeadSHA == "" || pr.HeadSHA != head {
+			if pr == nil || run.PRURL == nil || *run.PRURL == "" || pr.URL != *run.PRURL {
+				return "", fmt.Errorf("custody release requires the same recorded open PR; replacement is refused")
+			}
+			if pr.HeadSHA == "" || pr.HeadSHA != head {
 				return "", fmt.Errorf("existing PR head does not equal the caller's published head")
 			}
 			state := service.ReleasePublished(ctx, run.ID, head, p.Action == "reconcile", func(checkCtx context.Context) error {
 				again, err := m.existingPublicationPR(checkCtx, repo, run, root, publicationBranch)
-				if err != nil || again == nil || again.URL != pr.URL || again.HeadSHA != head {
+				if err != nil || again == nil || again.URL != *run.PRURL || again.HeadSHA != head {
 					return fmt.Errorf("existing PR head changed")
 				}
 				return nil
