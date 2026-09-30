@@ -62,13 +62,14 @@ type Executor struct {
 	shared   *RunShared
 	workDir  string
 
-	publicationSettling    bool       // guarded by mu; a reconciler has committed to leaving its gate
-	publicationMu          sync.Mutex // serializes parked destination changes and reconciliation
-	mu                     sync.Mutex
-	approvalCh             chan approvalResponse // buffered channel for approval responses
-	waiting                bool                  // true when blocked on approval
-	waitingStep            types.StepName        // which step is currently awaiting approval
-	waitingApprovalRefusal string                // non-empty: why Approve is rejected at the waiting gate
+	publicationSettling       bool       // guarded by mu; a reconciler has committed to leaving its gate
+	publicationMu             sync.Mutex // serializes parked destination changes and reconciliation
+	mu                        sync.Mutex
+	approvalCh                chan approvalResponse // buffered channel for approval responses
+	waiting                   bool                  // true when blocked on approval
+	waitingCIReadinessChanged func(bool, bool)
+	waitingStep               types.StepName // which step is currently awaiting approval
+	waitingApprovalRefusal    string         // non-empty: why Approve is rejected at the waiting gate
 
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
@@ -172,7 +173,13 @@ func (e *Executor) WhileParked(action func() error) error {
 	if !e.waiting || e.publicationSettling {
 		return fmt.Errorf("run is executing; publication rebinding requires a parked approval gate")
 	}
-	return action()
+	if err := action(); err != nil {
+		return err
+	}
+	if e.waitingCIReadinessChanged != nil {
+		e.waitingCIReadinessChanged(false, false)
+	}
+	return nil
 }
 
 // RespondWithOverrides is like Respond but also carries per-finding user
@@ -221,6 +228,7 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		return errors.New(refusal)
 	}
 	e.waiting = false
+	e.waitingCIReadinessChanged = nil
 	e.mu.Unlock()
 
 	e.approvalCh <- approvalResponse{
@@ -492,9 +500,10 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		Log: func(message string) {
 			slog.Info("recovered approval gate reconciliation", "run_id", run.ID, "step", gate.step.Name(), "message", message)
 		},
-		LogChunk:   func(string) {},
-		LogFile:    func(string) {},
-		OnPRMerged: e.onPRMerged,
+		LogChunk:           func(string) {},
+		LogFile:            func(string) {},
+		OnPRMerged:         e.onPRMerged,
+		CIReadinessChanged: e.ciReadinessCallback(run, repo),
 	}
 	if reconciled, reconcileErr := e.reconcileApprovalGate(ctx, gate.step, reconcileCtx, gate.findings); reconciled {
 		if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
@@ -518,6 +527,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.mu.Lock()
 	e.publicationSettling = false
 	e.waiting = true
+	e.waitingCIReadinessChanged = reconcileCtx.CIReadinessChanged
 	e.waitingStep = gate.step.Name()
 	e.waitingApprovalRefusal = approvalRefusal(gate.step.Name(), gate.findings)
 	e.mu.Unlock()
@@ -1023,17 +1033,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		// and the recorded evidence name the same round.
 		stepAgent = &roundStampingAgent{inner: stepAgent, round: func() int { return roundNum + 1 }}
 	}
-	ciReady := run.CIReadyAt != nil
-	ciReadyNoCI := run.CIReadyNoCI
-	ciReadinessChanged := func(ready, declaredNoCI bool) {
-		declaredNoCI = ready && declaredNoCI
-		if ciReady == ready && ciReadyNoCI == declaredNoCI {
-			return
-		}
-		ciReady = ready
-		ciReadyNoCI = declaredNoCI
-		e.emitCIReadinessEvent(run, repo, ready, declaredNoCI)
-	}
+
 	// A fix round is marked fixing before the step re-executes and only
 	// changes status when Execute returns. A step whose fix round ends with
 	// ordinary execution (the CI monitor after a published repair) reports
@@ -1074,7 +1074,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			fmt.Fprintln(logFile, text)
 			touchLogActivity(text, true)
 		},
-		CIReadinessChanged: ciReadinessChanged,
+		CIReadinessChanged: e.ciReadinessCallback(run, repo),
 		MarkRunning:        markRunning,
 		OnPRMerged:         e.onPRMerged,
 	}
@@ -1319,6 +1319,7 @@ rounds:
 			e.mu.Lock()
 			e.publicationSettling = false
 			e.waiting = true
+			e.waitingCIReadinessChanged = sctx.CIReadinessChanged
 			e.waitingStep = stepName
 			e.waitingApprovalRefusal = approvalRefusal(stepName, effectiveFindings)
 			e.mu.Unlock()
@@ -1335,6 +1336,7 @@ rounds:
 			if dbErr := e.db.ParkStepForApproval(run.ID, sr.ID, approvalStatus, finalExitCode, executionMS, findingsPtr); dbErr != nil {
 				e.mu.Lock()
 				e.waiting = false
+				e.waitingCIReadinessChanged = nil
 				e.waitingStep = ""
 				e.mu.Unlock()
 				return false, "", fmt.Errorf("persist %s approval gate: %w", stepName, dbErr)
@@ -1737,6 +1739,7 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 	defer func() {
 		e.mu.Lock()
 		e.waiting = false
+		e.waitingCIReadinessChanged = nil
 		e.waitingStep = ""
 		e.mu.Unlock()
 		// Drain any stale response that arrived after context cancellation or
@@ -1817,6 +1820,7 @@ func (e *Executor) claimGateReconciliation() bool {
 		return false
 	}
 	e.waiting = false
+	e.waitingCIReadinessChanged = nil
 	e.waitingStep = ""
 	return true
 }
@@ -2032,6 +2036,23 @@ func completionOverrideReasons(steps []*db.StepResult) (ciReason, testReason str
 		}
 	}
 	return ciReason, testReason
+}
+
+func (e *Executor) ciReadinessCallback(run *db.Run, repo *db.Repo) func(bool, bool) {
+	return func(ready, declaredNoCI bool) {
+		declaredNoCI = ready && declaredNoCI
+		if (run.CIReadyAt != nil) == ready && run.CIReadyNoCI == declaredNoCI {
+			return
+		}
+		if ready {
+			at := time.Now().Unix()
+			run.CIReadyAt = &at
+		} else {
+			run.CIReadyAt = nil
+		}
+		run.CIReadyNoCI = declaredNoCI
+		e.emitCIReadinessEvent(run, repo, ready, declaredNoCI)
+	}
 }
 
 func (e *Executor) emitCIReadinessEvent(run *db.Run, repo *db.Repo, ready, declaredNoCI bool) {
