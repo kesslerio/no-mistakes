@@ -113,7 +113,7 @@ If you push to the same branch while a run is already active, the daemon:
 2. Waits for it to finish
 3. Starts a new run with the latest push
 
-Pushes to different branches run concurrently.
+Pushes to different branches run concurrently unless a [publication destination reservation](/no-mistakes/reference/cli/#no-mistakes-publication-rebind) conflicts.
 
 This is another reason the daemon exists: branch-level coordination is easier to
 reason about in one long-lived process than inside independent hook invocations.
