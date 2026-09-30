@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/custody"
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -217,7 +218,12 @@ func (s *Service) ReleasePublished(ctx context.Context, selected, callerHead str
 		}
 		return fail("custody generation changed before stamping; gate restored and heads remain archived, inspect and retry")
 	}
-	state, _, _ = s.inspect(ctx)
+	state.State, state.Safety, state.Error = StateCustodyReturned, "gate_ready", ""
+	state.Relation = RelationEqual
+	state.Remote = RemoteState{ObservedHead: callerHead, Freshness: "live", ObservedAt: time.Now().Unix()}
+	state.Target.Kind, state.Target.Ref = targetKind(repo), branchRef
+	state.Recovery = &RecoveryEvidence{Source: "published_release", RunID: selected, Branch: state.Local.Branch, RequiredHead: callerHead, ArchiveRef: releaseArchiveRef(selected, callerHead), KeepLocal: true}
+	state.NextAction = &NextAction{Code: "run_pipeline", Command: `no-mistakes axi run --intent "<what the user set out to accomplish>"`}
 	state.Recovered, state.Changed = true, !exists || gateHead != callerHead || len(stack) > 0
 	return state
 }
@@ -244,19 +250,4 @@ func rawCommitRef(ctx context.Context, dir, ref string) (string, bool, error) {
 		return "", true, fmt.Errorf("not a commit")
 	}
 	return head, true, nil
-}
-
-func (s *Service) publishedReleaseHead(ctx context.Context, run *db.Run) string {
-	if run.CustodyReturnedAt == nil || !run.Status.Terminal() || s.GateDir == "" {
-		return ""
-	}
-	head, exists, err := rawCommitRef(ctx, s.GateDir, "refs/heads/"+run.Branch)
-	if err != nil || !exists {
-		return ""
-	}
-	archived, exists, err := rawCommitRef(ctx, s.GateDir, releaseArchiveRef(run.ID, head))
-	if err != nil || !exists || archived != head {
-		return ""
-	}
-	return head
 }
