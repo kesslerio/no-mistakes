@@ -90,3 +90,24 @@ func TestPublicationReservationRejectsReactivationAndOtherBranchOwner(t *testing
 		t.Fatal("custody released against another live publisher")
 	}
 }
+
+func TestPublicationBindingRefusesTerminalRuns(t *testing.T) {
+	for _, status := range []types.RunStatus{types.RunCompleted, types.RunFailed, types.RunCancelled} {
+		t.Run(string(status), func(t *testing.T) {
+			d := openTestDB(t)
+			repo, _ := d.InsertRepo("/test", "https://github.com/test/repo", "main")
+			run, _ := d.InsertRun(repo.ID, "validation", "head", "base")
+			if err := d.UpdateRunStatus(run.ID, status); err != nil {
+				t.Fatal(err)
+			}
+			run, _ = d.GetRun(run.ID)
+			if err := d.RebindPublication(repo, run, "existing", "https://github.com/test/repo/pull/1", "fingerprint"); err == nil {
+				t.Fatal("terminal run rebound")
+			}
+			got, _ := d.GetRun(run.ID)
+			if got.PublicationBranch != nil || got.PRURL != nil || got.LastPushedSHA != nil {
+				t.Fatalf("terminal provenance changed: %+v", got)
+			}
+		})
+	}
+}

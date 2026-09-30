@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -10,10 +11,11 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/scm/github"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestReboundPublicationPushesOnlyAppendOnlyToExistingBranch(t *testing.T) {
-	for _, scenario := range []string{"append", "advanced-managed", "rewrite", "missing", "advanced", "deleted-during-push", "closed-pr", "changed-target"} {
+	for _, scenario := range []string{"append", "advanced-managed", "rewrite", "missing", "advanced", "deleted-during-push", "closed-pr", "foreign-pr", "changed-target"} {
 		t.Run(scenario, func(t *testing.T) {
 			remote := t.TempDir()
 			gitCmd(t, remote, "init", "--bare")
@@ -40,8 +42,11 @@ func TestReboundPublicationPushesOnlyAppendOnlyToExistingBranch(t *testing.T) {
 			sctx.Env, _ = fakeGH(t, "https://github.com/test/repo/pull/1")
 			sctx.Env = append(sctx.Env, fmt.Sprintf(`FAKE_CLI_PR_LIST_JSON=[{"number":1,"url":"https://github.com/test/repo/pull/1","headRefName":"existing","headRepositoryOwner":{"login":%q}}]`, strings.Split(github.RepoSlug(remote), "/")[0]))
 			sctx.Env = append(sctx.Env, "FAKE_CLI_PR_HEAD_SHA="+submitted)
+			sctx.Env = append(sctx.Env, fmt.Sprintf(`FAKE_CLI_PR_PUBLICATION_JSON={"headRefOid":%q,"headRefName":"existing","headRepository":{"nameWithOwner":%q}}`, submitted, github.RepoSlug(remote)))
 			recordReviewApproval(t, sctx, head)
-			setupGateMirror(t, sctx)
+			gate := setupGateMirror(t, sctx)
+			gitCmd(t, gate, "fetch", dir, submitted+":refs/heads/feature")
+			gitCmd(t, dir, "checkout", "--detach", head)
 			before := submitted
 			switch scenario {
 			case "advanced-managed":
@@ -52,6 +57,8 @@ func TestReboundPublicationPushesOnlyAppendOnlyToExistingBranch(t *testing.T) {
 				path, _ := envValue(sctx.Env, "PATH")
 				linkTestBinary(t, filepath.SplitList(path)[0], "git")
 				sctx.Env = append(sctx.Env, "FAKE_CLI_MODE=gh-with-intervening-push", "FAKE_CLI_STATE=OPEN", "FAKE_CLI_REAL_GIT="+testGitExecutable, "FAKE_CLI_INTERLOPER_DIR="+dir, "FAKE_CLI_INTERLOPER_REMOTE="+remote, "FAKE_CLI_INTERLOPER_REF=:refs/heads/existing")
+			case "foreign-pr":
+				sctx.Env = append(sctx.Env, fmt.Sprintf(`FAKE_CLI_PR_PUBLICATION_JSON={"headRefOid":%q,"headRefName":"existing","headRepository":{"nameWithOwner":"other/repo"}}`, submitted))
 			case "closed-pr":
 				sctx.Env = append(sctx.Env, "FAKE_CLI_PR_STATE=CLOSED")
 			case "changed-target":
@@ -86,6 +93,12 @@ func TestReboundPublicationPushesOnlyAppendOnlyToExistingBranch(t *testing.T) {
 				}
 				if published, err := publishedBranchHead(sctx); err != nil || published != head {
 					t.Fatalf("CI monitored the wrong branch: %s %v", published, err)
+				}
+				if got := gitCmd(t, gate, "rev-parse", "refs/heads/feature"); got != head {
+					t.Fatalf("custody ref left stale: %s, want %s", got, head)
+				}
+				if _, err := git.Run(sctx.Ctx, gate, "rev-parse", "--verify", "refs/heads/existing"); err == nil {
+					t.Fatal("destination ref created in the custody mirror")
 				}
 				r, _ := sctx.DB.GetRun(sctx.Run.ID)
 				if scenario == "append" {
@@ -140,5 +153,49 @@ func TestPublicationHostUsesRegisteredUpstreamWithRepointedOrigin(t *testing.T) 
 	}
 	if sctx.Repo.URLsVerified {
 		t.Fatal("provider scoping mutated the caller's repository snapshot")
+	}
+}
+
+func TestReboundCICreditsOnlyThePublishedRunHead(t *testing.T) {
+	for _, published := range []bool{false, true} {
+		t.Run(fmt.Sprint(published), func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			sctx := newTestContextWithDBRecords(t, nil, dir, base, head, config.Commands{})
+			sctx.Repo.URLsVerified = true
+			prURL := "https://github.com/test/repo/pull/42"
+			if err := sctx.DB.RebindPublication(sctx.Repo, sctx.Run, "existing", prURL, branchsync.TargetFingerprint(sctx.Repo.PushURL())); err != nil {
+				t.Fatal(err)
+			}
+			providerHead := base
+			if published {
+				providerHead = head
+			}
+			sctx.Env = fakeCIGH(t, "OPEN", `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`)
+			sctx.Env = append(sctx.Env, "FAKE_CLI_PR_HEAD_SHA="+providerHead,
+				fmt.Sprintf(`FAKE_CLI_PR_PUBLICATION_JSON={"headRefOid":%q,"headRefName":"existing","headRepository":{"nameWithOwner":"test/repo"}}`, providerHead))
+			recordReviewApproval(t, sctx, head)
+			step := (&CIStep{}).SetBaseBranchTip(func(context.Context) (string, bool) { return base, true })
+			reason, err := step.VerifyApprovalOverride(sctx)
+			if err != nil || (reason == "") != published {
+				t.Fatalf("approval reason=%q err=%v published=%v", reason, err, published)
+			}
+			if !published {
+				if !strings.Contains(reason, "unpublished") {
+					t.Fatal(reason)
+				}
+				outcome, err := step.Execute(sctx)
+				if err != nil || outcome == nil || !outcome.NeedsApproval {
+					t.Fatalf("unpublished CI was credited: %+v %v", outcome, err)
+				}
+				findings, _ := types.ParseFindingsJSON(outcome.Findings)
+				if len(findings.Items) != 1 || !strings.Contains(findings.Items[0].Description, "unpublished") {
+					t.Fatalf("wrong condition: %+v", findings)
+				}
+				resolved, err := step.ReconcileApprovalGate(sctx)
+				if resolved || err == nil {
+					t.Fatalf("unpublished gate reconciled: %v %v", resolved, err)
+				}
+			}
+		})
 	}
 }

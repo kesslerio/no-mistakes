@@ -27,6 +27,7 @@ type Host struct {
 	cliAvailable func() bool
 	host         string // repo's GitHub hostname; scopes the auth check
 	repo         string // "owner/name" slug for --repo; empty when unknown
+	forkRepo     string
 	forkOwner    string // fork owner for cross-repository PR heads
 	draft        bool   // open created PRs as drafts (gh pr create --draft)
 	// assetHTTP and assetUploadPrefix override the unofficial user-attachments
@@ -62,6 +63,7 @@ func New(cmd CmdFactory, cliAvailable func() bool, host, repo string) *Host {
 func NewWithFork(cmd CmdFactory, cliAvailable func() bool, host, repo, forkRepo string, draft bool) *Host {
 	h := New(cmd, cliAvailable, host, repo)
 	h.forkOwner = repoOwner(forkRepo)
+	h.forkRepo = strings.TrimSpace(forkRepo)
 	h.draft = draft
 	return h
 }
@@ -760,12 +762,33 @@ func (h *Host) checkStartedAfter(a, b scm.Check) (bool, bool) {
 	return false, false
 }
 
-func (h *Host) GetPRHeadSHA(ctx context.Context, pr *scm.PR) (string, error) {
+func (h *Host) GetPRHeadSHA(ctx context.Context, pr *scm.PR, branch string) (string, error) {
 	selector, err := prSelector(pr)
 	if err != nil {
 		return "", err
 	}
-	return h.getPRHeadSHA(ctx, selector)
+	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
+	args = append(args, "--json", "headRefOid,headRefName,headRepository")
+	out, err := h.cmd(ctx, "gh", args...).Output()
+	if err != nil {
+		return "", fmt.Errorf("read publication PR head: %w", err)
+	}
+	var proof struct {
+		HeadRefOid     string
+		HeadRefName    string
+		HeadRepository *struct{ NameWithOwner string }
+	}
+	if err := json.Unmarshal(out, &proof); err != nil {
+		return "", fmt.Errorf("decode publication PR head: %w", err)
+	}
+	target := h.repoSlug()
+	if h.forkRepo != "" {
+		target = h.forkRepo
+	}
+	if target == "" || branch == "" || proof.HeadRepository == nil || !strings.EqualFold(proof.HeadRepository.NameWithOwner, target) || proof.HeadRefName != strings.TrimPrefix(branch, "refs/heads/") || strings.TrimSpace(proof.HeadRefOid) == "" {
+		return "", fmt.Errorf("publication PR head repository or branch does not match the configured push target")
+	}
+	return strings.TrimSpace(proof.HeadRefOid), nil
 }
 
 func (h *Host) getPRHeadSHA(ctx context.Context, selector string) (string, error) {

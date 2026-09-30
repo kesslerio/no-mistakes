@@ -197,17 +197,25 @@ func (s *Service) ReleasePublished(ctx context.Context, selected, callerHead str
 			seen[ref] = true
 		}
 	}
+	archiveChecks := commands
 	commands += fmt.Sprintf("update %s %s %s\nprepare\ncommit\n", branchRef, callerHead, old)
 	if _, err := git.RunWithInput(ctx, s.GateDir, commands, "update-ref", "--stdin"); err != nil {
 		return fail("the gate lane changed while custody was being returned; archived heads remain preserved")
 	}
 	if err := s.DB.ReleasePublishedCustody(repo, latest, stack); err != nil {
-		// Never undo another publisher's update. The gate's old head has already
-		// been archived, so even a failed rollback cannot orphan it.
+		rollbackCtx, rollbackCancel := context.WithTimeout(context.WithoutCancel(ctx), s.remoteTimeout())
+		defer rollbackCancel()
+		rollback := archiveChecks
 		if exists {
-			_, _ = git.RunBare(context.WithoutCancel(ctx), s.GateDir, "update-ref", "--no-deref", branchRef, gateHead, callerHead)
+			rollback += fmt.Sprintf("update %s %s %s\n", branchRef, gateHead, callerHead)
+		} else {
+			rollback += fmt.Sprintf("delete %s %s\n", branchRef, callerHead)
 		}
-		return fail("custody generation changed before stamping; heads remain archived, inspect and retry")
+		rollback += "prepare\ncommit\n"
+		if _, rollbackErr := git.RunWithInput(rollbackCtx, s.GateDir, rollback, "update-ref", "--stdin"); rollbackErr != nil {
+			return fail(fmt.Sprintf("custody generation changed before stamping; gate rollback failed: %v; heads remain archived, inspect before retrying", rollbackErr))
+		}
+		return fail("custody generation changed before stamping; gate restored and heads remain archived, inspect and retry")
 	}
 	state.State, state.Safety, state.Error = StateCustodyReturned, "gate_ready", ""
 	state.Recovered, state.Changed = true, !exists || gateHead != callerHead || len(stack) > 0

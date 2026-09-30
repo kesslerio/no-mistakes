@@ -51,7 +51,7 @@ func int64Value(p *int64) int64 {
 func (d *DB) RebindPublication(repo *Repo, run *Run, branch, prURL, targetFingerprint string) error {
 	result, err := d.sql.Exec(`UPDATE runs SET publication_branch = ?, publication_target_fingerprint = ?, pr_url = ?, pr_state = 'open',
 	 ci_ready_at = NULL, ci_ready_no_ci = 0, updated_at = ?
-	 WHERE id = ? AND repo_id = ? AND branch = ? AND status = ? AND head_sha = ?
+	 WHERE id = ? AND repo_id = ? AND branch = ? AND status = ? AND status IN ('pending', 'running') AND head_sha = ?
 	 AND (SELECT owner.id FROM runs owner WHERE owner.repo_id = runs.repo_id AND owner.branch = runs.branch ORDER BY owner.created_at DESC, owner.id DESC LIMIT 1) = runs.id
 	 AND COALESCE(push_generation, 0) = ? AND publication_branch IS ? AND publication_target_fingerprint IS ? AND pr_url IS ? AND COALESCE(push_active, 0) = 0
 	 AND EXISTS (SELECT 1 FROM repos WHERE id = ? AND upstream_url = ? AND COALESCE(fork_url, '') = ? AND default_branch = ? AND working_path = ?)

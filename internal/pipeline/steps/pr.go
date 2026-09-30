@@ -128,6 +128,15 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	if sctx.Run.PublicationBranch != nil && (existing == nil || sctx.Run.PRURL == nil || existing.URL != *sctx.Run.PRURL) {
 		return nil, fmt.Errorf("rebound publication requires the same existing PR; a replacement PR will not be created")
 	}
+	if sctx.Run.PublicationBranch != nil {
+		reader, ok := host.(scm.PRHeadReader)
+		if !ok {
+			return nil, fmt.Errorf("rebound publication provider cannot prove the PR head")
+		}
+		if _, err := reader.GetPRHeadSHA(ctx, existing, sctx.Run.PublishBranch()); err != nil {
+			return nil, err
+		}
+	}
 	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
 	if err != nil {
 		return nil, err

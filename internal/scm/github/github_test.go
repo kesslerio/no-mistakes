@@ -2002,8 +2002,8 @@ func TestGetPRHeadSHARequiresExplicitIdentityAndNonemptyRead(t *testing.T) {
 	t.Parallel()
 	for _, head := range []string{"published-head", ""} {
 		t.Run(head, func(t *testing.T) {
-			host := New(githubTestCmdFactory(map[string]githubTestResponse{"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: head}}), nil, "", "test/repo")
-			got, err := host.GetPRHeadSHA(context.Background(), &scm.PR{Number: "123", URL: "https://github.com/test/repo/pull/123"})
+			host := New(githubTestCmdFactory(map[string]githubTestResponse{"gh pr view 123 --repo test/repo --json headRefOid,headRefName,headRepository": {stdout: fmt.Sprintf(`{"headRefOid":%q,"headRefName":"existing","headRepository":{"nameWithOwner":"test/repo"}}`, head)}}), nil, "", "test/repo")
+			got, err := host.GetPRHeadSHA(context.Background(), &scm.PR{Number: "123", URL: "https://github.com/test/repo/pull/123"}, "existing")
 			if head == "" {
 				if err == nil {
 					t.Fatal("empty provider proof accepted")
@@ -2011,9 +2011,38 @@ func TestGetPRHeadSHARequiresExplicitIdentityAndNonemptyRead(t *testing.T) {
 			} else if err != nil || got != head {
 				t.Fatalf("head=%s err=%v", got, err)
 			}
-			if _, err := host.GetPRHeadSHA(context.Background(), &scm.PR{}); err == nil {
+			if _, err := host.GetPRHeadSHA(context.Background(), &scm.PR{}, "existing"); err == nil {
 				t.Fatal("cwd-inferred PR identity accepted")
 			}
 		})
+	}
+}
+
+func TestGetPRHeadSHARejectsAnotherRepositoryOrBranch(t *testing.T) {
+	t.Parallel()
+	for _, fork := range []string{"", "fork/renamed-repo"} {
+		for _, source := range []string{"test/repo", "fork/renamed-repo", "fork/repo", "other/repo", ""} {
+			for _, branch := range []string{"existing", "other", ""} {
+				t.Run(fork+"/"+source+"/"+branch, func(t *testing.T) {
+					head := strings.Repeat("a", 40)
+					payload := fmt.Sprintf(`{"headRefOid":%q,"headRefName":%q,"headRepository":{"nameWithOwner":%q}}`, head, branch, source)
+					host := NewWithFork(githubTestCmdFactory(map[string]githubTestResponse{
+						"gh pr view 123 --repo test/repo --json headRefOid,headRefName,headRepository": {stdout: payload},
+					}), nil, "", "test/repo", fork, false)
+					got, err := host.GetPRHeadSHA(context.Background(), &scm.PR{Number: "123"}, "existing")
+					target := "test/repo"
+					if fork != "" {
+						target = fork
+					}
+					if source == target && branch == "existing" {
+						if err != nil || got != head {
+							t.Fatalf("valid proof refused: %s %v", got, err)
+						}
+					} else if err == nil {
+						t.Fatal("foreign publication source accepted at the same SHA")
+					}
+				})
+			}
+		}
 	}
 }
