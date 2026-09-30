@@ -1116,9 +1116,25 @@ func TestRerunInheritsPRURLFromSelectedRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if err := d.UpdateRunStatus(first.RunID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
 	previous, _ := d.GetRun(first.RunID)
 	repo, _ := d.GetRepo(previous.RepoID)
 	if err := d.RebindPublication(repo, previous, "existing", prURL, branchsync.TargetFingerprint(repo.PushURL())); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(first.RunID, types.RunFailed); err != nil {
+		t.Fatal(err)
+	}
+	newer, err := d.InsertRun(repo.ID, "main", headSHA, headSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunPRURL(newer.ID, "https://github.com/test/repo/pull/43"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(newer.ID, types.RunFailed); err != nil {
 		t.Fatal(err)
 	}
 	var rerun ipc.RerunResult

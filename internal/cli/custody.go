@@ -35,7 +35,7 @@ func newCustodyOperationCmd(action string) *cobra.Command {
 	var runID, branch string
 	cmd := &cobra.Command{
 		Use: action, Args: cobra.NoArgs, SilenceErrors: true, SilenceUsage: true,
-		Short: "Bind a parked or terminal run to an existing PR branch, with append-only publication",
+		Short: "Bind a parked live run to an existing PR branch, with append-only publication",
 		Long: "Operate on the selected run from its registered checked-out custody branch.\n" +
 			"--run is required to fence the operation to the intended generation. Release\n" +
 			"and reconcile require a clean caller whose exact HEAD is already the open PR\n" +
@@ -43,7 +43,7 @@ func newCustodyOperationCmd(action string) *cobra.Command {
 			"before restoring the gate lane; missing unpublished heads and dirty managed\n" +
 			"worktrees refuse. Reconcile additionally requires a historical daemon lifecycle\n" +
 			"failure. Rebind accepts an existing open PR branch whose head is an ancestor\n" +
-			"of the managed head. A live run must be parked at an approval gate. Rebound\n" +
+			"of the managed head. The run must be live and parked at an approval gate. Rebound\n" +
 			"publication never creates a branch or rewrites history. No operation pushes,\n" +
 			"restarts the daemon, switches branches, or changes caller files.",
 		RunE: func(cmd *cobra.Command, args []string) error {

@@ -1651,14 +1651,18 @@ func (s *Service) AdoptPublished(ctx context.Context) State {
 // does, and an unusable credential fails the live check closed rather than
 // verifying against a remote the pipeline does not publish to.
 func (s *Service) resolvedPushURL(ctx context.Context, repo *db.Repo) string {
+	return ResolvePushURL(ctx, s.workDir(), repo)
+}
+
+func ResolvePushURL(ctx context.Context, dir string, repo *db.Repo) string {
 	target := repo.PushURL()
 	if strings.TrimSpace(target) == "" {
 		return ""
 	}
-	remotes, err := git.Run(ctx, s.workDir(), "remote")
+	remotes, err := git.Run(ctx, dir, "remote")
 	if err == nil {
 		for _, name := range strings.Fields(remotes) {
-			credentialled, err := git.GetConfiguredRemoteURL(ctx, s.workDir(), name)
+			credentialled, err := git.GetConfiguredRemoteURL(ctx, dir, name)
 			if err == nil && strings.TrimSpace(credentialled) != "" && TargetFingerprint(credentialled) == TargetFingerprint(target) {
 				return credentialled
 			}
@@ -1828,7 +1832,7 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 		state.Safety = "blocked_closed"
 		return state, run, true
 	}
-	if ptr(run.PushRef) != "refs/heads/"+branch || ptr(run.PushTargetFingerprint) != TargetFingerprint(s.Repo.PushURL()) || ptr(run.PushTargetKind) != targetKind(s.Repo) {
+	if ptr(run.PushRef) != "refs/heads/"+strings.TrimPrefix(run.PublishBranch(), "refs/heads/") || ptr(run.PushTargetFingerprint) != TargetFingerprint(s.Repo.PushURL()) || ptr(run.PushTargetKind) != targetKind(s.Repo) {
 		state.State = StateTargetChanged
 		state.Safety = "blocked_target_changed"
 		state.Error = "the configured push target or branch ref changed after the pipeline push"
@@ -2051,7 +2055,7 @@ func exactPushedBinding(repo *db.Repo, run *db.Run, branch string) bool {
 		run.LastPushedSHA != nil && run.HeadSHA == ptr(run.LastPushedSHA) &&
 		run.PushTargetKind != nil && ptr(run.PushTargetKind) == targetKind(repo) &&
 		run.PushTargetFingerprint != nil && ptr(run.PushTargetFingerprint) == TargetFingerprint(repo.PushURL()) &&
-		run.PushRef != nil && ptr(run.PushRef) == "refs/heads/"+branch &&
+		run.PushRef != nil && ptr(run.PushRef) == "refs/heads/"+strings.TrimPrefix(run.PublishBranch(), "refs/heads/") &&
 		run.PushGeneration != nil
 }
 

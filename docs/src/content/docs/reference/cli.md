@@ -544,7 +544,7 @@ no-mistakes publication rebind --run <run-id> --branch <existing-pr-branch>
 no-mistakes axi publication rebind --run <run-id> --branch <existing-pr-branch>
 ```
 
-Run from that run's registered custody branch. A live run must be parked at an approval gate; a terminal run must have no executor still finishing. The daemon verifies the existing PR, configured push target, exact live remote head and its ancestry in the recorded managed head. Another active publisher, a default branch, a missing/retired PR, unverifiable evidence, or a destination that requires history rewrite refuses without changing the binding.
+Run from that run's registered custody branch. The run must be live and parked at an approval gate. The daemon verifies the existing PR, configured push target, exact live remote head and its ancestry in the recorded managed head. Another active publisher, a default branch, a missing/retired PR, unverifiable evidence, or a destination that requires history rewrite refuses without changing the binding.
 
 The operation itself never pushes or changes caller files. Push, PR and CI read the durable destination when they resume. Rebound pushes permit only append-only updates, with an explicit remote-head lease that also rejects deletion or replacement between verification and publication. They never create a new branch or replacement PR. A supported rerun carrying the same inherited PR URL keeps the destination; changing repository routing invalidates its target proof. `axi status` reports `publication_branch` separately from the original custody `branch`.
 

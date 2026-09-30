@@ -2,6 +2,9 @@ package branchsync
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -278,3 +281,59 @@ func TestReleasePublishedRechecksArchivesAndManagedWork(t *testing.T) {
 }
 
 func releasePRProof(context.Context) error { return nil }
+
+func TestReleasePublishedRollsBackAfterDatabaseRefusal(t *testing.T) {
+	t.Parallel()
+	for _, scenario := range []string{"existing", "missing", "intervening-publisher"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newPublishedReleaseFixture(t)
+			ref := "refs/heads/feature/sync"
+			if scenario != "existing" {
+				mustRun(t, f.service.GateDir, "update-ref", "-d", ref)
+			}
+			connection, err := sql.Open("sqlite", filepath.Join(filepath.Dir(f.local), "state.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer connection.Close()
+			if _, err := connection.Exec(`CREATE TRIGGER refuse_custody_stamp BEFORE UPDATE OF custody_returned_at ON runs BEGIN SELECT RAISE(ABORT, 'registration fence refused'); END`); err != nil {
+				t.Fatal(err)
+			}
+			if scenario == "intervening-publisher" {
+				hook := fmt.Sprintf("#!/bin/sh\n[ \"$1\" = committed ] || exit 0\nwhile read old new ref; do\nif [ \"$ref\" = '%s' ] && [ \"$new\" = '%s' ]; then\ngit --git-dir='%s' update-ref --no-deref '%s' '%s' '%s' || exit 1\nfi\ndone\n", ref, f.pushed, f.service.GateDir, ref, f.base, f.pushed)
+				if err := os.WriteFile(filepath.Join(f.service.GateDir, "hooks", "reference-transaction"), []byte(hook), 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			state := f.service.ReleasePublished(f.ctx, f.run.ID, f.pushed, false, releasePRProof)
+			if state.Recovered || !strings.Contains(state.Error, "generation changed") {
+				t.Fatalf("unexpected release: %+v", state)
+			}
+			got, exists, err := git.ExactRefTarget(f.ctx, f.service.GateDir, ref)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch scenario {
+			case "existing":
+				if !exists || got != f.run.HeadSHA {
+					t.Fatalf("old gate head not restored: %s", got)
+				}
+			case "missing":
+				if exists {
+					t.Fatalf("created gate ref retained after refusal: %s", got)
+				}
+			case "intervening-publisher":
+				if got != f.base || !strings.Contains(state.Error, "rollback failed") {
+					t.Fatalf("other publisher or rollback failure lost: %s %+v", got, state)
+				}
+			}
+			if archived := mustRun(t, f.service.GateDir, "rev-parse", releaseArchiveRef(f.run.ID, f.pushed)); archived != f.pushed {
+				t.Fatal("published head not archived")
+			}
+			run, _ := f.db.GetRun(f.run.ID)
+			if run.CustodyReturnedAt != nil {
+				t.Fatal("refused stamp released custody")
+			}
+		})
+	}
+}

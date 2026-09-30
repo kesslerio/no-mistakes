@@ -401,7 +401,7 @@ type Host interface {
 // PRHeadReader reads the current head of an existing PR by its durable identity.
 // Custody operations require this proof rather than an inferred local head.
 type PRHeadReader interface {
-	GetPRHeadSHA(ctx context.Context, pr *PR) (string, error)
+	GetPRHeadSHA(ctx context.Context, pr *PR, branch string) (string, error)
 }
 
 // PRBaseBranchReader is implemented by providers that can read the target

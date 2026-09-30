@@ -122,6 +122,10 @@ func (m *RunManager) HandleCustodyOperation(ctx context.Context, p *ipc.CustodyO
 		if p.PublicationBranch == repo.DefaultBranch {
 			return "", fmt.Errorf("cannot rebind publication to the default branch")
 		}
+		if run.Status.Terminal() {
+			return "", fmt.Errorf("publication rebinding requires a parked live run")
+		}
+		pushURL := branchsync.ResolvePushURL(ctx, root, repo)
 		bind := func() error {
 			fresh, err := m.db.GetRun(run.ID)
 			if err != nil || fresh == nil || fresh.PushActive || fresh.Status != run.Status || fresh.HeadSHA != run.HeadSHA {
@@ -134,14 +138,14 @@ func (m *RunManager) HandleCustodyOperation(ctx context.Context, p *ipc.CustodyO
 			}
 			remoteCtx, cancel := context.WithTimeout(ctx, cfg.BranchSyncRemoteTimeout)
 			ref := "refs/heads/" + p.PublicationBranch
-			live, err := git.LsRemote(remoteCtx, root, repo.PushURL(), ref)
+			live, err := git.LsRemote(remoteCtx, root, pushURL, ref)
 			cancel()
 			if err != nil || live == "" || live != pr.HeadSHA {
 				return fmt.Errorf("existing PR and publication branch heads disagree or cannot be verified")
 			}
 			managed := worktrees.RecordedDir(m.paths, run.WorktreePath(), run.RepoID, run.ID)
 			remoteCtx, cancel = context.WithTimeout(ctx, cfg.BranchSyncRemoteTimeout)
-			err = git.FetchRemoteRef(remoteCtx, managed, repo.PushURL(), ref, live)
+			err = git.FetchRemoteRef(remoteCtx, managed, pushURL, ref, live)
 			cancel()
 			if err != nil {
 				return fmt.Errorf("import publication head: %w", err)
@@ -155,11 +159,11 @@ func (m *RunManager) HandleCustodyOperation(ctx context.Context, p *ipc.CustodyO
 			}
 			// Re-read the provider and remote, not merely the stored PR URL.
 			again, err := m.existingPublicationPR(ctx, repo, run, root, p.PublicationBranch)
-			if err != nil || again.URL != pr.URL || again.HeadSHA != live {
+			if err != nil || again == nil || again.URL != pr.URL || again.HeadSHA != live {
 				return fmt.Errorf("PR changed during publication rebinding")
 			}
 			remoteCtx, cancel = context.WithTimeout(ctx, cfg.BranchSyncRemoteTimeout)
-			remoteHead, err := git.LsRemote(remoteCtx, root, repo.PushURL(), ref)
+			remoteHead, err := git.LsRemote(remoteCtx, root, pushURL, ref)
 			cancel()
 			if err != nil || remoteHead != live {
 				return fmt.Errorf("publication branch changed during rebinding")
@@ -175,23 +179,13 @@ func (m *RunManager) HandleCustodyOperation(ctx context.Context, p *ipc.CustodyO
 			result = &ipc.CustodyOperationResult{RunID: run.ID, State: "confirmed", Branch: p.PublicationBranch, HeadSHA: live, PRURL: pr.URL}
 			return nil
 		}
-		if run.Status.Terminal() {
-			m.mu.Lock()
-			_, live := m.executors[run.ID]
-			m.mu.Unlock()
-			if live {
-				return "", fmt.Errorf("terminal executor is still finishing")
-			}
-			err = bind()
-		} else {
-			m.mu.Lock()
-			executor := m.executors[run.ID]
-			m.mu.Unlock()
-			if executor == nil {
-				return "", fmt.Errorf("live run has no executor; reconcile its lifecycle before rebinding")
-			}
-			err = executor.WhileParked(bind)
+		m.mu.Lock()
+		executor := m.executors[run.ID]
+		m.mu.Unlock()
+		if executor == nil {
+			return "", fmt.Errorf("live run has no executor; reconcile its lifecycle before rebinding")
 		}
+		err = executor.WhileParked(bind)
 		return run.ID, err
 	}
 	_, err = m.withBranchLock(run.RepoID, branches[0], func() (string, error) {
@@ -240,7 +234,7 @@ func (m *RunManager) existingPublicationPR(ctx context.Context, repo *db.Repo, r
 	if !ok {
 		return nil, fmt.Errorf("publication provider cannot prove the existing PR head; custody is unchanged")
 	}
-	pr.HeadSHA, err = reader.GetPRHeadSHA(ctx, pr)
+	pr.HeadSHA, err = reader.GetPRHeadSHA(ctx, pr, branch)
 	if err != nil || pr.HeadSHA == "" {
 		return nil, fmt.Errorf("existing PR head is unverifiable; custody is unchanged")
 	}

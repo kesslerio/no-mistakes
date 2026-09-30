@@ -149,7 +149,9 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 	// until the upstream push is verified, because a refused or failed push is
 	// a designed outcome and a gate left with no branch ref would strand
 	// `rerun` and branch-sync recovery on a branch that never published.
-	mirrorPlan, err := planGateMirrorReconciliation(ctx, sctx, ref, branch, headBeingPushed)
+	custodyRef := normalizedBranchRef(sctx.Run.Branch)
+	custodyBranch := strings.TrimPrefix(custodyRef, "refs/heads/")
+	mirrorPlan, err := planGateMirrorReconciliation(ctx, sctx, custodyRef, custodyBranch, headBeingPushed)
 	if err != nil {
 		return err
 	}
@@ -231,7 +233,7 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 	// returning the error makes the CI monitor treat an already published
 	// repair as a failed one, and recording first and swallowing the error
 	// strands the gate behind the remote for good.
-	if err := updateGateMirrorAfterPush(ctx, sctx, ref, headBeingPushed, mirrorPlan); err != nil {
+	if err := updateGateMirrorAfterPush(ctx, sctx, custodyRef, headBeingPushed, mirrorPlan); err != nil {
 		return err
 	}
 

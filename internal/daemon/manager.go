@@ -955,7 +955,7 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 		if gateHead != headSHA {
 			return "", fmt.Errorf("launch context drift: gate branch %q is at %s, not requested %s", branch, gateHead, headSHA)
 		}
-		inheritedPRURL := ""
+		var inheritedRun *db.Run
 		if baseSHA == "" {
 			runs, err := m.db.GetRunsByRepoHead(repo.ID, branch, headSHA)
 			if err != nil {
@@ -964,10 +964,10 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 			baseSHA = headSHA
 			if len(runs) > 0 {
 				baseSHA = runs[0].BaseSHA
-				inheritedPRURL = inheritablePRURL(runs[0])
+				inheritedRun = runs[0]
 			}
 		}
-		runID, err := m.startRunWithIntentSourceLocked(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, persistedIntent, db.RunIntentSourceAgent, launchNonce, validationGeneration, requestDigest, storedPRBaseBranch, omitIntent, inheritedPRURL, planID, closingIssues, request)
+		runID, err := m.startRunWithIntentSourceLocked(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, persistedIntent, db.RunIntentSourceAgent, launchNonce, validationGeneration, requestDigest, storedPRBaseBranch, omitIntent, inheritedRun, planID, closingIssues, request)
 		if err != nil {
 			return "", err
 		}
@@ -1171,10 +1171,7 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	// selected run's decision is inherited and this rerun can only add to it.
 	// The locked start then folds in the operator's live global default, which
 	// likewise can only add omission, never remove it.
-	// Closing references are structured run metadata and survive reruns: an
-	// explicit request is added to, never replaces, what the selected run carried.
-	closingIssues = append(append([]string(nil), selectedRun.ClosingIssueRefs...), closingIssues...)
-	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource, storedPRBaseBranch, selectedRun.OmitIntent || omitIntent, inheritablePRURL(selectedRun), planID, closingIssues, profiles...)
+	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource, storedPRBaseBranch, selectedRun.OmitIntent || omitIntent, selectedRun, planID, closingIssues, profiles...)
 }
 
 func inheritablePRURL(run *db.Run) string {
@@ -1311,15 +1308,15 @@ func loadRepoConfigAtSHA(ctx context.Context, dir, sha string) *config.RepoConfi
 // A non-empty intent is stamped onto the run as agent-supplied, so the intent
 // step uses it instead of inferring from transcripts.
 func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, prBaseBranch string, omitIntent bool, planID string, closingIssues []string, profiles ...*agentcfg.PiProfile) (string, error) {
-	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, intent, db.RunIntentSourceAgent, prBaseBranch, omitIntent, "", planID, closingIssues, profiles...)
+	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, intent, db.RunIntentSourceAgent, prBaseBranch, omitIntent, nil, planID, closingIssues, profiles...)
 }
 
 // startRunWithIntentSource is the common run-creation path. source is empty
 // when no intent is supplied, RunIntentSourceAgent for a new explicit
 // override, and RunIntentSourceRerun for inherited explicit intent.
-func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, prBaseBranch string, omitIntent bool, inheritedPRURL, planID string, closingIssues []string, profiles ...*agentcfg.PiProfile) (string, error) {
+func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, prBaseBranch string, omitIntent bool, inheritedRun *db.Run, planID string, closingIssues []string, profiles ...*agentcfg.PiProfile) (string, error) {
 	return m.withBranchLock(repo.ID, branch, func() (string, error) {
-		return m.startRunWithIntentSourceLocked(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, intent, source, "", "", "", prBaseBranch, omitIntent, inheritedPRURL, planID, closingIssues, profiles...)
+		return m.startRunWithIntentSourceLocked(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, intent, source, "", "", "", prBaseBranch, omitIntent, inheritedRun, planID, closingIssues, profiles...)
 	})
 }
 
@@ -1334,7 +1331,7 @@ func (m *RunManager) withBranchLock(repoID, branch string, action func() (string
 
 // startRunWithIntentSourceLocked performs run creation while the caller owns
 // the repository/branch lock. Proof fields are empty for ordinary launches.
-func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, launchNonce, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, inheritedPRURL, planID string, closingIssues []string, profiles ...*agentcfg.PiProfile) (string, error) {
+func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, launchNonce, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, inheritedRun *db.Run, planID string, closingIssues []string, profiles ...*agentcfg.PiProfile) (string, error) {
 	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
 	trackStartFailure := func(stage string) {
 		telemetry.Track("run", telemetry.Fields{
@@ -1446,37 +1443,27 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
 	}
-	if inherited := strings.TrimSpace(inheritedPRURL); inherited != "" {
-		if err := m.db.UpdateRunPRURL(run.ID, inherited); err != nil {
-			m.db.UpdateRunError(run.ID, fmt.Sprintf("inherit PR URL: %s", err))
-			trackStartFailure("inherit_pr_url")
-			return "", fmt.Errorf("inherit PR URL: %w", err)
-		}
-
-		run.PRURL = &inherited
-		prior, err := m.db.GetRunsByRepo(repo.ID)
-		if err != nil {
-			_ = m.db.UpdateRunError(run.ID, err.Error())
-			return "", err
-		}
-		for _, candidate := range prior {
-			if candidate.ID == run.ID || candidate.Branch != run.Branch {
-				continue
+	if inheritedRun != nil {
+		if inherited := inheritablePRURL(inheritedRun); inherited != "" {
+			if err := m.db.UpdateRunPRURL(run.ID, inherited); err != nil {
+				m.db.UpdateRunError(run.ID, fmt.Sprintf("inherit PR URL: %s", err))
+				trackStartFailure("inherit_pr_url")
+				return "", fmt.Errorf("inherit PR URL: %w", err)
 			}
-			if candidate.PublicationBranch != nil && candidate.PRURL != nil && *candidate.PRURL == inherited {
-				if candidate.PublicationTargetFingerprint == nil {
+			run.PRURL = &inherited
+			if inheritedRun.PublicationBranch != nil {
+				if inheritedRun.RepoID != run.RepoID || inheritedRun.Branch != run.Branch || inheritedRun.PublicationTargetFingerprint == nil {
 					err := fmt.Errorf("missing inherited publication target proof")
 					_ = m.db.UpdateRunError(run.ID, err.Error())
 					return "", err
 				}
-				if err := m.db.RebindPublication(repo, run, *candidate.PublicationBranch, inherited, *candidate.PublicationTargetFingerprint); err != nil {
+				if err := m.db.RebindPublication(repo, run, *inheritedRun.PublicationBranch, inherited, *inheritedRun.PublicationTargetFingerprint); err != nil {
 					_ = m.db.UpdateRunError(run.ID, err.Error())
 					return "", err
 				}
-				run.PublicationBranch = candidate.PublicationBranch
-				run.PublicationTargetFingerprint = candidate.PublicationTargetFingerprint
+				run.PublicationBranch = inheritedRun.PublicationBranch
+				run.PublicationTargetFingerprint = inheritedRun.PublicationTargetFingerprint
 			}
-			break
 		}
 	}
 	if len(closingIssues) > 0 {

@@ -64,13 +64,35 @@ func assertReboundPublicationPR(sctx *pipeline.StepContext, remoteHead string) e
 	if !ok {
 		return fmt.Errorf("rebound publication provider cannot prove the PR head")
 	}
-	pr.HeadSHA, err = reader.GetPRHeadSHA(sctx.Ctx, pr)
+	pr.HeadSHA, err = reader.GetPRHeadSHA(sctx.Ctx, pr, sctx.Run.PublishBranch())
 	if err != nil || pr.HeadSHA == "" || pr.HeadSHA != remoteHead {
 		return fmt.Errorf("rebound publication PR head changed")
 	}
 	state, err := host.GetPRState(sctx.Ctx, pr)
 	if err != nil || state != scm.PRStateOpen {
 		return fmt.Errorf("rebound publication PR is retired or unverifiable")
+	}
+	return nil
+}
+
+func assertReboundCIHead(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR) error {
+	if sctx.Run.PublicationBranch == nil {
+		return nil
+	}
+	if pr.HeadSHA != "" && pr.HeadSHA != sctx.Run.HeadSHA {
+		return fmt.Errorf("rebound CI checks describe head %s; run head is %s", pr.HeadSHA, sctx.Run.HeadSHA)
+	}
+	reader, ok := host.(scm.PRHeadReader)
+	if !ok {
+		return fmt.Errorf("rebound CI provider cannot prove the publication head")
+	}
+	head, err := reader.GetPRHeadSHA(sctx.Ctx, pr, sctx.Run.PublishBranch())
+	if err != nil {
+		return fmt.Errorf("rebound CI publication head is unverifiable: %w", err)
+	}
+	pr.HeadSHA = head
+	if head != sctx.Run.HeadSHA {
+		return fmt.Errorf("rebound CI destination has head %s; run head %s is unpublished there", head, sctx.Run.HeadSHA)
 	}
 	return nil
 }

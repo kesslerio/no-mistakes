@@ -57,12 +57,11 @@ func custodyManagerFixture(t *testing.T) (*RunManager, *ipc.CustodyOperationPara
 	return m, &ipc.CustodyOperationParams{Action: "rebind", RepoID: repo.ID, RunID: run.ID, WorkDir: repo.WorkingPath, HeadSHA: head, PublicationBranch: "existing"}, remote
 }
 
-func TestCustodyManagerRebindsParkedLiveRunWithoutRenamingCustody(t *testing.T) {
-	m, p, remote := custodyManagerFixture(t)
+func parkCustodyRun(t *testing.T, m *RunManager, p *ipc.CustodyOperationParams) {
+	t.Helper()
 	run, _ := m.db.GetRun(p.RunID)
 	repo, _ := m.db.GetRepo(p.RepoID)
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 	e := pipeline.NewExecutor(m.db, m.paths, config.Merge(config.DefaultGlobalConfig(), &config.RepoConfig{}), nil, []pipeline.Step{&mockApprovalStep{name: types.StepReview}}, nil)
 	m.executors[run.ID] = e
 	done := make(chan error, 1)
@@ -86,6 +85,12 @@ func TestCustodyManagerRebindsParkedLiveRunWithoutRenamingCustody(t *testing.T) 
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+func TestCustodyManagerRebindsParkedLiveRunWithoutRenamingCustody(t *testing.T) {
+	m, p, remote := custodyManagerFixture(t)
+	parkCustodyRun(t, m, p)
+	run, _ := m.db.GetRun(p.RunID)
 	result, err := m.HandleCustodyOperation(context.Background(), p)
 	if err != nil {
 		t.Fatal(err)
@@ -106,9 +111,12 @@ func TestCustodyManagerRebindsParkedLiveRunWithoutRenamingCustody(t *testing.T) 
 }
 
 func TestCustodyManagerPublicationRefusals(t *testing.T) {
-	for _, scenario := range []string{"missing-branch", "missing-pr", "rewrite", "default-branch", "wrong-head", "wrong-run", "active-unparked", "dirty-release"} {
+	for _, scenario := range []string{"missing-branch", "missing-pr", "rewrite", "default-branch", "wrong-head", "wrong-run", "active-unparked", "terminal", "dirty-release"} {
 		t.Run(scenario, func(t *testing.T) {
 			m, p, remote := custodyManagerFixture(t)
+			if scenario != "active-unparked" && scenario != "dirty-release" && scenario != "terminal" {
+				parkCustodyRun(t, m, p)
+			}
 			switch scenario {
 			case "missing-branch":
 				gitCmd(t, remote, "update-ref", "-d", "refs/heads/existing")
@@ -190,6 +198,7 @@ func TestCustodyManagerRebindRefusesChangedGenerationOrProvider(t *testing.T) {
 	for _, scenario := range []string{"head", "target", "default", "registration", "pr", "other-publisher"} {
 		t.Run(scenario, func(t *testing.T) {
 			m, p, _ := custodyManagerFixture(t)
+			parkCustodyRun(t, m, p)
 			calls := 0
 			original := m.publicationPR
 			m.publicationPR = func(ctx context.Context, repo *db.Repo, r *db.Run, dir, branch string) (*scm.PR, error) {

@@ -140,6 +140,9 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 	if err != nil {
 		return false, fmt.Errorf("extract PR number: %w", err)
 	}
+	if err := assertReboundCIHead(sctx, host, &scm.PR{Number: prNumber, URL: prURL}); err != nil {
+		return false, err
+	}
 	state, err := host.GetPRState(sctx.Ctx, &scm.PR{Number: prNumber, URL: prURL})
 	if err != nil {
 		return false, err
@@ -219,9 +222,16 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 	if err != nil {
 		return fmt.Sprintf("could not verify live CI state: %v", err), nil
 	}
-	checks, err := host.GetChecks(ctx, &scm.PR{Number: prNumber, URL: prURL})
+	pr := &scm.PR{Number: prNumber, URL: prURL}
+	if err := assertReboundCIHead(sctx, host, pr); err != nil {
+		return err.Error(), nil
+	}
+	checks, err := host.GetChecks(ctx, pr)
 	if err != nil {
 		return fmt.Sprintf("could not verify live CI state: %v", err), nil
+	}
+	if err := assertReboundCIHead(sctx, host, pr); err != nil {
+		return err.Error(), nil
 	}
 	if allChecksPassed(checks) {
 		return "", nil
@@ -506,6 +516,16 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			return timeoutOutcome()
 		}
 
+		pr.HeadSHA = sctx.Run.HeadSHA
+		if err := assertReboundCIHead(sctx, host, pr); err != nil {
+			clearCIMonitorReady(sctx)
+			findings, _ := types.MarshalFindingsJSON(Findings{
+				Summary: "rebound CI publication head is unresolved",
+				Items:   []Finding{{Severity: "warning", Description: err.Error(), Action: types.ActionAskUser}},
+			})
+			return &pipeline.StepOutcome{NeedsApproval: true, Findings: findings}, nil
+		}
+
 		// Check PR state (merged/closed -> exit)
 		prStateKnown := true
 		state, err := host.GetPRState(ctx, pr)
@@ -565,11 +585,13 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		}
 
 		// Check CI status - wait for all checks to complete before escalating
-		pr.HeadSHA = sctx.Run.HeadSHA
 		checks, err := host.GetChecks(ctx, pr)
 		if err != nil && pluginPollFailsStep(err) {
 			clearCIMonitorReady(sctx)
 			return nil, err
+		}
+		if err == nil {
+			err = assertReboundCIHead(sctx, host, pr)
 		}
 		if err != nil {
 			clearCIMonitorReady(sctx)
