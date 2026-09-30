@@ -289,24 +289,15 @@ func (s *Service) Refresh(ctx context.Context) State {
 	if !ok || !refreshable(state) {
 		return state
 	}
-	released := state.Recovery != nil && state.Recovery.Source == "published_release"
-	bound := ptr(run.LastPushedSHA)
-	if released {
-		bound = state.Recovery.RequiredHead
-	}
 	freshRun, runErr := s.DB.GetRun(run.ID)
 	freshRepo, repoErr := s.DB.GetRepo(s.Repo.ID)
 	if runErr != nil || repoErr != nil || freshRun == nil || freshRepo == nil || freshRun.PushActive ||
 		value(freshRun.PushGeneration) != state.Pipeline.PushGeneration || ptr(freshRun.LastPushedSHA) != state.Pipeline.PushedHead ||
-		(!released && (ptr(freshRun.PushTargetFingerprint) != TargetFingerprint(freshRepo.PushURL()) || ptr(freshRun.PushTargetKind) != targetKind(freshRepo) || ptr(freshRun.PushRef) != state.Target.Ref)) {
+		ptr(freshRun.PushTargetFingerprint) != TargetFingerprint(freshRepo.PushURL()) || ptr(freshRun.PushTargetKind) != targetKind(freshRepo) || ptr(freshRun.PushRef) != state.Target.Ref {
 		if state.PRState == "merged" || state.PRState == "closed" {
 			return state
 		}
 		return blockedPlan(state, StateTargetChanged, "blocked_binding_changed", "the push binding or configured target changed before refresh; no files or refs were changed")
-	}
-	if released && (value(freshRun.CustodyReturnedAt) != value(run.CustodyReturnedAt) || !freshRun.Status.Terminal() ||
-		freshRepo.UpstreamURL != s.Repo.UpstreamURL || freshRepo.ForkURL != s.Repo.ForkURL || freshRepo.DefaultBranch != s.Repo.DefaultBranch || freshRepo.WorkingPath != s.Repo.WorkingPath) {
-		return blockedPlan(state, StateTargetChanged, "blocked_binding_changed", "the released lane or configured target changed before refresh; no files or refs were changed")
 	}
 	pushURL := freshRepo.PushURL()
 
@@ -368,6 +359,7 @@ func (s *Service) Refresh(ctx context.Context) State {
 		return state
 	}
 
+	bound := ptr(run.LastPushedSHA)
 	if live != bound {
 		state.NextAction = nil
 		if isAncestor(ctx, s.workDir(), bound, live) {
@@ -384,7 +376,7 @@ func (s *Service) Refresh(ctx context.Context) State {
 			// explicit guarded rebind (see recoverRemoteRewritten); an active
 			// run still owns its binding and must finish first.
 			// A merged or closed PR retired the branch: nothing is rebound.
-			if released || state.PRState == "merged" || state.PRState == "closed" {
+			if state.PRState == "merged" || state.PRState == "closed" {
 				state.NextAction = nil
 			} else if terminalRunStatus(freshRun.Status) {
 				state.NextAction = &NextAction{Code: "recover_remote_rewritten", Command: "no-mistakes axi sync --recover"}
@@ -395,14 +387,6 @@ func (s *Service) Refresh(ctx context.Context) State {
 		return state
 	}
 
-	if released {
-		recheck, current, ok := s.inspect(ctx)
-		if !ok || current == nil || current.ID != run.ID || recheck.Recovery == nil || recheck.Recovery.Source != "published_release" ||
-			recheck.Recovery.RequiredHead != bound || recheck.Local != state.Local || value(current.CustodyReturnedAt) != value(run.CustodyReturnedAt) {
-			return blockedPlan(state, StateTargetChanged, "blocked_binding_changed", "the released lane evidence changed during refresh; no files or refs were changed")
-		}
-		return state
-	}
 	if state.PRState == "merged" {
 		state.State = StateMergedRemoteRetained
 		state.Safety = "blocked_merged"
@@ -1358,11 +1342,7 @@ func (s *Service) recoverRemoteRewritten(ctx context.Context, run *db.Run, keepL
 		blocked.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --recover"}
 		return blocked, true
 	}
-	if fresh.Pipeline.RunID == run.ID && fresh.State == StateCustodyReturned && fresh.Remote.Freshness == "live" &&
-		fresh.Recovery != nil && fresh.Recovery.Source == "published_release" && fresh.Remote.ObservedHead == fresh.Recovery.RequiredHead {
-		return State{}, false
-	}
-	if (fresh.Recovery == nil || fresh.Recovery.Source != "published_release") && fresh.Pipeline.RunID == run.ID && fresh.Remote.Freshness == "live" && fresh.Remote.ObservedHead != "" &&
+	if fresh.Pipeline.RunID == run.ID && fresh.Remote.Freshness == "live" && fresh.Remote.ObservedHead != "" &&
 		fresh.Remote.ObservedHead == ptr(run.LastPushedSHA) && fresh.Pipeline.PushedHead == fresh.Remote.ObservedHead {
 		return State{}, false
 	}
@@ -1798,24 +1778,6 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 		state.NextAction = &NextAction{Code: "continue_active_run", Command: "no-mistakes axi status"}
 		return state, run, false
 	}
-	if releasedHead := s.publishedReleaseHead(ctx, run); releasedHead != "" {
-		state.State, state.Safety, state.Error = StateCustodyReturned, "gate_ready", ""
-		state.Relation = relationBetween(ctx, root, head, releasedHead)
-		state.Remote = RemoteState{ObservedHead: releasedHead, Freshness: "published_release", ObservedAt: value(run.CustodyReturnedAt)}
-		state.Target.Kind, state.Target.Ref = targetKind(s.Repo), "refs/heads/"+branch
-		state.Recovery = &RecoveryEvidence{Source: "published_release", RunID: run.ID, Branch: branch, RequiredHead: releasedHead, ArchiveRef: releaseArchiveRef(run.ID, releasedHead), KeepLocal: true}
-		state.NextAction = &NextAction{Code: "run_pipeline", Command: `no-mistakes axi run --intent "<what the user set out to accomplish>"`}
-		if head != releasedHead {
-			state.Safety = "custody_returned"
-		}
-		if duplicateBranchCheckout(ctx, root, branch) {
-			return blockedPlan(state, StateAmbiguousContext, "blocked_branch_ambiguous", "the checked-out branch is attached to more than one worktree"), run, false
-		}
-		if !clean {
-			return blockedPlan(state, StateDirty, "blocked_"+reason, "the invoking worktree is not completely clean; no network read or mutation was attempted"), run, false
-		}
-		return state, run, true
-	}
 	if run.LastPushedSHA == nil || run.PushTargetFingerprint == nil || run.PushRef == nil || run.PushGeneration == nil || run.SubmittedHeadSHA == nil {
 		if run.SubmittedHeadSHA != nil && run.HeadSHA != ptr(run.SubmittedHeadSHA) {
 			if run.CustodyReturnedAt != nil {
@@ -2030,8 +1992,6 @@ func (s *Service) workDir() string {
 
 func refreshable(state State) bool {
 	switch state.State {
-	case StateCustodyReturned:
-		return state.Recovery != nil && state.Recovery.Source == "published_release"
 	case StateBehind, StateSynchronized, StateLocalAhead, StateDiverged, StateMergedRemoteRetained, StateClosed, StateAmbiguousContext:
 		return true
 	default:
