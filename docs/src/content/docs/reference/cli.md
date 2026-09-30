@@ -353,6 +353,7 @@ no-mistakes axi status --run <id>
 When the resolved run is parked at an `awaiting_approval` or `fix_review` gate, its top-level `run:` or `other_branch_run:` object includes `awaiting_agent: parked <duration>` immediately after `status`.
 The field disappears after that run's gate is answered, on cancel, and on terminal outcomes; use it to distinguish a run waiting for the driving agent from one actively running, fixing, or watching CI.
 A pinned run also includes `pi_profile` with `model` and `effort`; see [per-run Pi profiles](/no-mistakes/reference/global-config/#per-run-pi-profiles).
+An explicitly rebound run includes `publication_branch` separately from its original custody `branch`; see [publication rebind](#no-mistakes-publication-rebind).
 Status offers branch-scoped `axi respond` commands only for the current branch's implicitly resolved run. An explicitly selected gate stays inspection-only even when its branch matches, because a newer active run on that branch could receive the bare response command instead; the gate remains visible and its log commands retain `--run <id>`.
 When a repository has no configured lint command and Document performs the combined Document/Lint housekeeping invocation, the run object includes `shared_work` evidence naming its `document+lint housekeeping` scope and the duration attributed to Document; Lint's own duration remains the cached-result handoff time.
 When the resolved run has a `running` or `fixing` step, the run object includes `active_steps`.
@@ -535,6 +536,8 @@ Release refuses a missing recorded head, uncommitted managed work, a live source
 
 After success, a fresh `no-mistakes axi run --intent "..."` can adopt the existing branch. The current exact-PR-head reader supports GitHub, including configured GitHub fork routing; providers without that capability refuse safely.
 
+Release preserves historical run heads and successful-push provenance. Its successful response confirms the completed release, but later status and sync still classify against the historical push binding. After release at a replacement published head, they can report advancement or rewriting, or offer synchronization toward the old head. Use the successful release result to start a fresh run at the existing published head rather than synchronizing back to that historical head. Release archives and a custody-return stamp alone do not prove completed publication: archives can survive a refused release, and ordinary recovery can write the same stamp for unpublished work.
+
 ## no-mistakes publication rebind
 
 Change a run's publication destination to an existing open PR branch without renaming its custody branch or fabricating successful-push evidence:
@@ -546,7 +549,7 @@ no-mistakes axi publication rebind --run <run-id> --branch <existing-pr-branch>
 
 Run from that run's registered custody branch. The run must be live and parked at an approval gate. The daemon verifies the existing PR, configured push target, exact live remote head and its ancestry in the recorded managed head. Another active publisher, a default branch, a missing/retired PR, unverifiable evidence, or a destination that requires history rewrite refuses without changing the binding.
 
-The operation itself never pushes or changes caller files. Push, PR and CI read the durable destination when they resume. Rebound pushes permit only append-only updates, with an explicit remote-head lease that also rejects deletion or replacement between verification and publication. They never create a new branch or replacement PR. A supported rerun carrying the same inherited PR URL keeps the destination; changing repository routing invalidates its target proof. `axi status` reports `publication_branch` separately from the original custody `branch`.
+The operation itself never pushes or changes caller files. It clears CI readiness, including the declared-no-CI signal, and notifies attached consumers. Push, PR and CI read the durable destination when they resume; their [publication guards](/no-mistakes/reference/pipeline-steps/#push) apply to rebound runs. A supported rerun carrying the same inherited PR URL keeps the destination; changing repository routing invalidates its target proof. Destination ownership and the inherited target proof are checked before superseding an active source run.
 
 ## no-mistakes rerun
 

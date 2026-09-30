@@ -1836,7 +1836,7 @@ func TestInheritedPublicationConflictPreservesCurrentSourceRun(t *testing.T) {
 				var runID string
 				request := func() {
 					if route == "rerun" {
-						runID, err = m.HandleRerun(context.Background(), repo.ID, previous.Branch, previous.ID, nil, "", "", false, "", "")
+						runID, err = m.HandleRerun(context.Background(), repo.ID, previous.Branch, previous.ID, nil, "", "", false, "", "", nil)
 					} else {
 						var receipt ipc.LaunchReceipt
 						receipt, err = m.HandleStartFreshRun(context.Background(), &ipc.StartFreshRunParams{RepoID: repo.ID, Branch: previous.Branch, HeadSHA: gateHead, LaunchNonce: "new-launch", ValidationGeneration: "generation", Intent: "preserve current validation"})
