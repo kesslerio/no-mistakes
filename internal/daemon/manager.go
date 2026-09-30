@@ -1414,7 +1414,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		}
 	}
 
-	if owner, err := m.db.PublicationOwner(repo.ID, branch, ""); err != nil {
+	if owner, err := m.db.PublicationOwner(repo.ID, branch); err != nil {
 		return "", err
 	} else if owner != nil && owner.Branch != branch {
 		return "", fmt.Errorf("branch is reserved by publication run %s", owner.ID)

@@ -29,7 +29,8 @@ func (m *RunManager) HandleCustodyOperation(ctx context.Context, p *ipc.CustodyO
 	if err != nil || run == nil || run.RepoID != p.RepoID {
 		return nil, fmt.Errorf("selected run does not belong to the registered repository")
 	}
-	branches := []string{run.Branch}
+	custodyBranch, publicationBranch := run.Branch, run.PublishBranch()
+	branches := []string{custodyBranch, publicationBranch}
 	if p.Action == "rebind" {
 		if p.PublicationBranch == "" || strings.HasPrefix(p.PublicationBranch, "-") {
 			return nil, fmt.Errorf("an existing publication branch is required")
@@ -51,6 +52,9 @@ func (m *RunManager) HandleCustodyOperation(ctx context.Context, p *ipc.CustodyO
 		run, err = m.db.GetRun(p.RunID)
 		if err != nil || run == nil {
 			return "", fmt.Errorf("selected run is unavailable")
+		}
+		if run.Branch != custodyBranch || run.PublishBranch() != publicationBranch {
+			return "", fmt.Errorf("run binding changed before branch reservation; inspect and retry")
 		}
 		root, err := git.FindGitRoot(p.WorkDir)
 		if err != nil {
@@ -86,8 +90,11 @@ func (m *RunManager) HandleCustodyOperation(ctx context.Context, p *ipc.CustodyO
 		}
 		service := &branchsync.Service{DB: m.db, Repo: repo, Paths: m.paths, WorkDir: root, GateDir: m.paths.RepoDir(repo.ID), RemoteTimeout: cfg.BranchSyncRemoteTimeout}
 		if p.Action != "rebind" {
-			if owner, err := m.db.PublicationOwner(repo.ID, branch, run.ID); err != nil || owner != nil {
-				return "", fmt.Errorf("a live publication owner reserves this branch; custody was not released")
+			for _, candidate := range runs {
+				if !candidate.Status.Terminal() && candidate.ID != run.ID &&
+					(candidate.Branch == branch || candidate.PublishBranch() == branch || candidate.Branch == publicationBranch || candidate.PublishBranch() == publicationBranch) {
+					return "", fmt.Errorf("a live publication owner reserves this branch; custody was not released")
+				}
 			}
 			// A run cannot be terminal in the DB while its executor still owns
 			// worktree cleanup or a Git subprocess.
@@ -97,7 +104,7 @@ func (m *RunManager) HandleCustodyOperation(ctx context.Context, p *ipc.CustodyO
 			if live {
 				return "", fmt.Errorf("run executor is still live; wait for it to finish before releasing custody")
 			}
-			pr, err := m.existingPublicationPR(ctx, repo, run, root, branch)
+			pr, err := m.existingPublicationPR(ctx, repo, run, root, publicationBranch)
 			if err != nil {
 				return "", err
 			}
@@ -105,7 +112,7 @@ func (m *RunManager) HandleCustodyOperation(ctx context.Context, p *ipc.CustodyO
 				return "", fmt.Errorf("existing PR head does not equal the caller's published head")
 			}
 			state := service.ReleasePublished(ctx, run.ID, head, p.Action == "reconcile", func(checkCtx context.Context) error {
-				again, err := m.existingPublicationPR(checkCtx, repo, run, root, branch)
+				again, err := m.existingPublicationPR(checkCtx, repo, run, root, publicationBranch)
 				if err != nil || again == nil || again.URL != pr.URL || again.HeadSHA != head {
 					return fmt.Errorf("existing PR head changed")
 				}

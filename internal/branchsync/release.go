@@ -15,8 +15,9 @@ import (
 )
 
 // ReleasePublished returns custody without discarding unpublished work. The
-// daemon must serialize this with launches on the branch and verify its open
-// PR. The invoking branch must already exist at exactly HEAD on the configured
+// daemon must serialize this with launches on both the custody and publication
+// branches and verify the open PR. The run's publication branch must already
+// exist at exactly the invoking HEAD on the configured
 // push target. Every terminal head and independently moved gate head is
 // archived before a compare-and-swap restores the gate lane. Nothing in the
 // operator worktree or public history is changed. Missing unpublished objects,
@@ -70,8 +71,12 @@ func (s *Service) ReleasePublished(ctx context.Context, selected, callerHead str
 		return fail("reconcile requires a failed run carrying a historical daemon shutdown/restart error")
 	}
 	branchRef := "refs/heads/" + state.Local.Branch
-	if state.Local.Branch == repo.DefaultBranch {
+	publicationRef := "refs/heads/" + latest.PublishBranch()
+	if state.Local.Branch == repo.DefaultBranch || latest.PublishBranch() == repo.DefaultBranch {
 		return fail("custody release cannot adopt the default branch")
+	}
+	if latest.PublicationBranch != nil && ptr(latest.PublicationTargetFingerprint) != TargetFingerprint(repo.PushURL()) {
+		return fail("the recorded publication target changed; custody was not returned")
 	}
 	gateHead, exists, err := rawCommitRef(ctx, s.GateDir, branchRef)
 	if err != nil {
@@ -79,13 +84,13 @@ func (s *Service) ReleasePublished(ctx context.Context, selected, callerHead str
 	}
 	pushURL := s.resolvedPushURL(ctx, repo)
 	liveCtx, cancel := context.WithTimeout(ctx, s.remoteTimeout())
-	live, err := s.runLsRemote(liveCtx, s.workDir(), pushURL, branchRef)
+	live, err := s.runLsRemote(liveCtx, s.workDir(), pushURL, publicationRef)
 	cancel()
 	if err != nil || live == "" || live != callerHead {
 		return fail("the existing publication branch does not exactly match caller HEAD; no unpublished local work may be adopted")
 	}
 	fetchCtx, cancel := context.WithTimeout(ctx, s.remoteTimeout())
-	err = git.FetchRemoteRef(fetchCtx, s.GateDir, pushURL, branchRef, callerHead)
+	err = git.FetchRemoteRef(fetchCtx, s.GateDir, pushURL, publicationRef, callerHead)
 	cancel()
 	if err != nil {
 		return fail("the published head could not be verified and imported into the gate")
@@ -158,7 +163,7 @@ func (s *Service) ReleasePublished(ctx context.Context, selected, callerHead str
 		return fail("the existing PR changed or became unverifiable during recovery")
 	}
 	liveCtx, cancel = context.WithTimeout(ctx, s.remoteTimeout())
-	live, err = s.runLsRemote(liveCtx, s.workDir(), pushURL, branchRef)
+	live, err = s.runLsRemote(liveCtx, s.workDir(), pushURL, publicationRef)
 	cancel()
 	if err != nil || live != callerHead {
 		return fail("the published branch changed during recovery; retry after inspection")
@@ -221,7 +226,7 @@ func (s *Service) ReleasePublished(ctx context.Context, selected, callerHead str
 	state.State, state.Safety, state.Error = StateCustodyReturned, "gate_ready", ""
 	state.Relation = RelationEqual
 	state.Remote = RemoteState{ObservedHead: callerHead, Freshness: "live", ObservedAt: time.Now().Unix()}
-	state.Target.Kind, state.Target.Ref = targetKind(repo), branchRef
+	state.Target.Kind, state.Target.Ref = targetKind(repo), publicationRef
 	state.Recovery = &RecoveryEvidence{Source: "published_release", RunID: selected, Branch: state.Local.Branch, RequiredHead: callerHead, ArchiveRef: releaseArchiveRef(selected, callerHead), KeepLocal: true}
 	state.NextAction = &NextAction{Code: "run_pipeline", Command: `no-mistakes axi run --intent "<what the user set out to accomplish>"`}
 	state.Recovered, state.Changed = true, !exists || gateHead != callerHead || len(stack) > 0
