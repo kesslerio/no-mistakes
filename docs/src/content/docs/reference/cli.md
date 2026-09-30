@@ -393,7 +393,7 @@ The ordinary worktree mutation is either a strict fast-forward of the invoking c
 When a clean local branch and the pipeline-pushed head are diverged but the local unique work is content-equivalent to work already represented in the live pipeline head, `sync` reports `safety: safe_equivalent_advance`, anchors the pre-sync head under `refs/no-mistakes/sync-anchor/<run>`, and moves to the pipeline head with reset semantics.
 Genuine divergence still reports `safety: blocked_diverged` and changes nothing during ordinary synchronization.
 Under `--recover`, the possible worktree mutation is a strict fast-forward to the preserved pipeline head, or an adoption of a preserved head proven to carry every local change, both after relation-specific preservation checks. The bound-archive exception described below never changes the worktree at all.
-When the local gate branch is exactly at a newer same-branch pushed binding and Git proves that an older terminal run's unpublished preserved head is its ancestor, branch synchronization selects the newer binding; missing gate evidence, non-ancestor heads, or different or ambiguous target provenance remain blocked.
+When the local custody gate branch is exactly at a newer successful push binding for that custody branch and Git proves that an older terminal run's unpublished preserved head is its ancestor, status, synchronization and recovery select the newer binding. If the older run was explicitly rebound, matching target provenance uses its verified publication destination rather than its historical push ref; the newer run must have successfully published to that destination on the configured target. Historical run heads and push bindings remain unchanged. Missing gate evidence, non-ancestor heads, unpublished replacements, or different or ambiguous target provenance remain blocked.
 Fork configurations verify the configured fork URL and exact feature ref rather than assuming `origin`.
 Dirty, in-progress, ahead, genuinely diverged, detached, wrong-branch, offline, changed-target, rewritten, deleted, legacy, or retired states fail closed without destructive recovery.
 Run `axi sync` only when structured output offers `next_action.code: sync`; process any blocked state instead of substituting reset, stash, merge, rebase, force, or branch replacement.
@@ -548,6 +548,8 @@ no-mistakes axi publication rebind --run <run-id> --branch <existing-pr-branch>
 ```
 
 Run from that run's registered custody branch. The run must be live and parked at an approval gate. The daemon verifies the existing PR, configured push target, exact live remote head and its ancestry in the recorded managed head. Another active publisher, a default branch, a missing/retired PR, unverifiable evidence, or a destination that requires history rewrite refuses without changing the binding.
+
+AXI run objects keep `branch` as the custody branch and include `publication_branch` when a destination is explicitly bound.
 
 The operation itself never pushes or changes caller files. It clears CI readiness, including the declared-no-CI signal, and notifies attached consumers. Push, PR and CI read the durable destination when they resume; their [publication guards](/no-mistakes/reference/pipeline-steps/#push) apply to rebound runs. A supported rerun carrying the same inherited PR URL keeps the destination; changing repository routing invalidates its target proof. Destination ownership and the inherited target proof are checked before superseding an active source run.
 
