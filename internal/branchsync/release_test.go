@@ -366,6 +366,98 @@ func TestReleasePublishedRechecksArchivesAndManagedWork(t *testing.T) {
 
 func releasePRProof(context.Context) error { return nil }
 
+func TestReleasePublishedUsesRecordedDestinationAndKeepsCustodyLane(t *testing.T) {
+	for _, scenario := range []string{"source-missing", "source-different", "destination-missing", "destination-different", "destination-changed", "destination-owner", "rebound-owner", "target-changed", "default-destination"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newPublishedReleaseFixture(t)
+			if err := f.db.UpdateRunStatus(f.run.ID, types.RunRunning); err != nil {
+				t.Fatal(err)
+			}
+			liveRun, _ := f.db.GetRun(f.run.ID)
+			destination := "existing"
+			if scenario == "default-destination" {
+				destination = "main"
+			}
+			if err := f.db.RebindPublication(f.repo, liveRun, destination, "https://github.com/test/repo/pull/1", TargetFingerprint(f.remote)); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.db.UpdateRunErrorStatusWithVerifiedHead(f.run.ID, "daemon shutting down", types.RunFailed, f.run.HeadSHA); err != nil {
+				t.Fatal(err)
+			}
+			publicationRef := "refs/heads/" + destination
+			mustRun(t, f.local, "push", f.remote, f.pushed+":"+publicationRef)
+			reason := ""
+			switch scenario {
+			case "source-missing":
+				mustRun(t, f.remote, "update-ref", "-d", "refs/heads/feature/sync")
+			case "source-different":
+				mustRun(t, f.remote, "update-ref", "refs/heads/feature/sync", f.base)
+			case "destination-missing":
+				mustRun(t, f.remote, "update-ref", "-d", publicationRef)
+				reason = "exactly match"
+			case "destination-different":
+				mustRun(t, f.remote, "update-ref", publicationRef, f.base)
+				reason = "exactly match"
+			case "destination-changed":
+				calls := 0
+				f.service.lsRemote = func(ctx context.Context, dir, remote, ref string) (string, error) {
+					calls++
+					if calls == 2 {
+						mustRun(t, f.remote, "update-ref", publicationRef, f.base)
+					}
+					return git.LsRemote(ctx, dir, remote, ref)
+				}
+				reason = "branch changed"
+			case "destination-owner", "rebound-owner":
+				branch := destination
+				if scenario == "rebound-owner" {
+					branch = "other-source"
+				}
+				owner, err := f.db.InsertRun(f.repo.ID, branch, f.pushed, f.base)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "rebound-owner" {
+					if err := f.db.RebindPublication(f.repo, owner, destination, "https://github.com/test/repo/pull/1", TargetFingerprint(f.remote)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				reason = "generation changed"
+			case "target-changed":
+				if _, err := f.db.UpdateRepoMetadata(f.repo.ID, f.remote+"-different", "main"); err != nil {
+					t.Fatal(err)
+				}
+				reason = "publication target changed"
+			case "default-destination":
+				reason = "default branch"
+			}
+			state := f.service.ReleasePublished(f.ctx, f.run.ID, f.pushed, true, releasePRProof)
+			run, _ := f.db.GetRun(f.run.ID)
+			gateHead := mustRun(t, f.service.GateDir, "rev-parse", "refs/heads/feature/sync")
+			if reason != "" {
+				if state.Recovered || !strings.Contains(state.Error, reason) || run.CustodyReturnedAt != nil || gateHead != f.run.HeadSHA {
+					t.Fatalf("unsafe release: state=%+v run=%+v gate=%s; want %q", state, run, gateHead, reason)
+				}
+				return
+			}
+			if !state.Recovered || state.Target.Ref != publicationRef || run.CustodyReturnedAt == nil || gateHead != f.pushed {
+				t.Fatalf("rebound release: state=%+v run=%+v gate=%s", state, run, gateHead)
+			}
+			for _, head := range []string{f.run.HeadSHA, f.pushed} {
+				if got := mustRun(t, f.service.GateDir, "rev-parse", releaseArchiveRef(f.run.ID, head)); got != head {
+					t.Fatal("owned head not archived")
+				}
+			}
+			if _, exists, err := git.ExactRefTarget(f.ctx, f.service.GateDir, publicationRef); err != nil || exists {
+				t.Fatalf("release created a destination gate lane: exists=%v err=%v", exists, err)
+			}
+			if run.PublishBranch() != destination || ptr(run.PushRef) != ptr(f.run.PushRef) || ptr(run.LastPushedSHA) != f.pushed || run.HeadSHA != f.run.HeadSHA {
+				t.Fatalf("lost historical provenance: %+v", run)
+			}
+		})
+	}
+}
+
 func TestReleasePublishedRollsBackAfterDatabaseRefusal(t *testing.T) {
 	t.Parallel()
 	for _, scenario := range []string{"existing", "missing", "intervening-publisher"} {

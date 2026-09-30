@@ -26,7 +26,7 @@ func TestPublicationBindingFencesAndExcludesAnotherPublisher(t *testing.T) {
 	if err := d.RebindPublication(repo, other, "existing", "https://github.com/test/repo/pull/1", "fingerprint"); err == nil {
 		t.Fatal("second rebound publisher admitted")
 	}
-	owner, err := d.PublicationOwner(repo.ID, "existing", "")
+	owner, err := d.PublicationOwner(repo.ID, "existing")
 	if err != nil || owner == nil || owner.ID != run.ID || owner.PublishBranch() != "existing" || owner.Branch != "validation" {
 		t.Fatalf("owner=%+v err=%v", owner, err)
 	}
@@ -107,6 +107,65 @@ func TestPublicationBindingRefusesTerminalRuns(t *testing.T) {
 			got, _ := d.GetRun(run.ID)
 			if got.PublicationBranch != nil || got.PRURL != nil || got.LastPushedSHA != nil {
 				t.Fatalf("terminal provenance changed: %+v", got)
+			}
+		})
+	}
+}
+
+func TestPublishedCustodyStampFencesRecordedPublicationDestination(t *testing.T) {
+	for _, scenario := range []string{"unchanged", "branch-changed", "target-changed", "destination-owner", "rebound-owner"} {
+		t.Run(scenario, func(t *testing.T) {
+			d := openTestDB(t)
+			repo, _ := d.InsertRepo("/test", "https://github.com/test/repo", "main")
+			run, _ := d.InsertRun(repo.ID, "source", "head", "base")
+			if err := d.RebindPublication(repo, run, "destination", "https://github.com/test/repo/pull/1", "fingerprint"); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+				t.Fatal(err)
+			}
+			run, _ = d.GetRun(run.ID)
+			switch scenario {
+			case "branch-changed", "target-changed":
+				if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+					t.Fatal(err)
+				}
+				live, _ := d.GetRun(run.ID)
+				branch, fingerprint := "destination", "fingerprint"
+				if scenario == "branch-changed" {
+					branch = "different"
+				} else {
+					fingerprint = "different"
+				}
+				if err := d.RebindPublication(repo, live, branch, *run.PRURL, fingerprint); err != nil {
+					t.Fatal(err)
+				}
+				if err := d.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+					t.Fatal(err)
+				}
+			case "destination-owner", "rebound-owner":
+				branch := "destination"
+				if scenario == "rebound-owner" {
+					branch = "other-source"
+				}
+				owner, err := d.InsertRun(repo.ID, branch, "head", "base")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "rebound-owner" {
+					if err := d.RebindPublication(repo, owner, "destination", *run.PRURL, "fingerprint"); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			err := d.ReleasePublishedCustody(repo, run, []*Run{run})
+			got, _ := d.GetRun(run.ID)
+			if scenario == "unchanged" {
+				if err != nil || got.CustodyReturnedAt == nil {
+					t.Fatalf("valid binding refused: run=%+v err=%v", got, err)
+				}
+			} else if err == nil || got.CustodyReturnedAt != nil {
+				t.Fatalf("stale or owned destination released: run=%+v err=%v", got, err)
 			}
 		})
 	}
