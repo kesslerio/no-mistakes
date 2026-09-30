@@ -77,33 +77,141 @@ func TestReleasePublishedArchivesAndRestoresMissingOrStaleGate(t *testing.T) {
 	}
 }
 
-func TestReleasePublishedAdoptsDivergedPRHeadWithoutChangingPushHistory(t *testing.T) {
+func TestReleasePublishedClassificationKeepsHistoricalPushProvenance(t *testing.T) {
 	t.Parallel()
-	f := newPublishedReleaseFixture(t)
-	// A separately published replacement can differ from both the old push
-	// binding and the stranded pipeline head. Adoption preserves all three.
-	mustRun(t, f.local, "reset", "--hard", f.base)
-	mustRun(t, f.local, "commit", "--allow-empty", "-m", "separately published replacement")
-	published := mustRun(t, f.local, "rev-parse", "HEAD")
-	mustRun(t, f.local, "push", f.remote, published+":refs/heads/feature/sync", "--force-with-lease=refs/heads/feature/sync:"+f.pushed)
-	state := f.service.ReleasePublished(f.ctx, f.run.ID, published, true, releasePRProof)
-	if !state.Recovered || state.NextAction == nil || state.NextAction.Code != "run_pipeline" {
-		t.Fatalf("diverged publication was not adopted: %+v", state)
-	}
-	for _, head := range []string{published, f.run.HeadSHA, f.pushed} {
-		if got := mustRun(t, f.service.GateDir, "rev-parse", releaseArchiveRef(f.run.ID, head)); got != head {
-			t.Fatalf("lost preserved head %s: %s", head, got)
+	for _, replacement := range []string{"equal", "ancestor", "descendant", "diverged"} {
+		for _, restartOnly := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/reconcile=%v", replacement, restartOnly), func(t *testing.T) {
+				f := newPublishedReleaseFixture(t)
+				switch replacement {
+				case "ancestor":
+					mustRun(t, f.local, "reset", "--hard", f.base)
+				case "descendant":
+					mustRun(t, f.local, "commit", "--allow-empty", "-m", "published descendant")
+				case "diverged":
+					mustRun(t, f.local, "reset", "--hard", f.base)
+					mustRun(t, f.local, "commit", "--allow-empty", "-m", "published replacement")
+				}
+				published := mustRun(t, f.local, "rev-parse", "HEAD")
+				mustRun(t, f.local, "push", f.remote, published+":refs/heads/feature/sync", "--force-with-lease=refs/heads/feature/sync:"+f.pushed)
+				state := f.service.ReleasePublished(f.ctx, f.run.ID, published, restartOnly, releasePRProof)
+				if !state.Recovered {
+					t.Fatalf("release = %+v", state)
+				}
+				for _, head := range []string{published, f.run.HeadSHA, f.pushed} {
+					if got := mustRun(t, f.service.GateDir, "rev-parse", releaseArchiveRef(f.run.ID, head)); got != head {
+						t.Fatalf("lost preserved head %s: %s", head, got)
+					}
+				}
+				checks := []struct {
+					name    string
+					inspect func(context.Context) State
+				}{
+					{"cached", f.service.InspectCached}, {"refresh", f.service.Refresh}, {"sync", f.service.Apply},
+					{"recover", func(ctx context.Context) State { return f.service.Recover(ctx, false) }},
+				}
+				for _, check := range checks {
+					got := check.inspect(f.ctx)
+					if got.State != StateCustodyReturned || got.Safety != "gate_ready" || got.Relation != RelationEqual || got.Error != "" || got.Changed || got.NextAction == nil || got.NextAction.Code != "run_pipeline" {
+						t.Fatalf("%s = %+v", check.name, got)
+					}
+					if got.Pipeline.PushedHead != f.pushed || got.Pipeline.CurrentHead != f.run.HeadSHA || got.Remote.ObservedHead != published || got.Recovery == nil || got.Recovery.RequiredHead != published {
+						t.Fatalf("%s lost release or historical evidence: %+v", check.name, got)
+					}
+					if check.name == "recover" && !got.Recovered {
+						t.Fatalf("recovery not idempotent: %+v", got)
+					}
+				}
+				for _, dir := range []string{f.local, f.remote, f.service.GateDir} {
+					if got := mustRun(t, dir, "rev-parse", "refs/heads/feature/sync"); got != published {
+						t.Fatalf("follow-up changed %s head: %s", dir, got)
+					}
+				}
+				run, err := f.db.GetRun(f.run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if run.CustodyReturnedAt == nil || run.HeadSHA != f.run.HeadSHA || ptr(run.LastPushedSHA) != f.pushed || value(run.PushGeneration) != value(f.run.PushGeneration) || ptr(run.Error) != ptr(f.run.Error) {
+					t.Fatalf("lost historical provenance: %+v", run)
+				}
+			})
 		}
 	}
-	if got := mustRun(t, f.service.GateDir, "rev-parse", "refs/heads/feature/sync"); got != published {
-		t.Fatalf("fresh-run gate head = %s, want %s", got, published)
-	}
-	run, _ := f.db.GetRun(f.run.ID)
-	if run.CustodyReturnedAt == nil || run.HeadSHA != f.run.HeadSHA || ptr(run.LastPushedSHA) != f.pushed {
-		t.Fatalf("lost historical provenance: %+v", run)
-	}
-	if inspected := f.service.InspectCached(f.ctx); inspected.State == StatePipelineOwned || inspected.State == StatePushInProgress {
-		t.Fatalf("old run still blocks fresh adoption: %+v", inspected)
+}
+
+func TestReleasePublishedInspectionRequiresStampedArchiveAndGateEvidence(t *testing.T) {
+	t.Parallel()
+	for _, scenario := range []string{"unstamped", "missing-archive", "symbolic-archive", "conflicting-archive", "missing-gate", "symbolic-gate", "dirty", "remote-changed", "archive-race"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newPublishedReleaseFixture(t)
+			mustRun(t, f.local, "reset", "--hard", f.base)
+			mustRun(t, f.local, "commit", "--allow-empty", "-m", "published replacement")
+			published := mustRun(t, f.local, "rev-parse", "HEAD")
+			mustRun(t, f.local, "push", "--force", f.remote, "HEAD:refs/heads/feature/sync")
+			if state := f.service.ReleasePublished(f.ctx, f.run.ID, published, false, releasePRProof); !state.Recovered {
+				t.Fatalf("release = %+v", state)
+			}
+			ref := "refs/heads/feature/sync"
+			archive := releaseArchiveRef(f.run.ID, published)
+			switch scenario {
+			case "unstamped":
+				connection, err := sql.Open("sqlite", filepath.Join(filepath.Dir(f.local), "state.sqlite"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer connection.Close()
+				if _, err := connection.Exec("UPDATE runs SET custody_returned_at = NULL WHERE id = ?", f.run.ID); err != nil {
+					t.Fatal(err)
+				}
+			case "missing-archive":
+				mustRun(t, f.service.GateDir, "update-ref", "-d", archive)
+			case "symbolic-archive":
+				mustRun(t, f.service.GateDir, "symbolic-ref", archive, ref)
+			case "conflicting-archive":
+				mustRun(t, f.service.GateDir, "update-ref", archive, f.pushed)
+			case "missing-gate":
+				mustRun(t, f.service.GateDir, "update-ref", "-d", ref)
+			case "symbolic-gate":
+				mustRun(t, f.service.GateDir, "update-ref", "refs/heads/alias", published)
+				mustRun(t, f.service.GateDir, "symbolic-ref", ref, "refs/heads/alias")
+			case "dirty":
+				mustWrite(t, filepath.Join(f.local, "dirty"), "uncommitted")
+			case "remote-changed":
+				mustRun(t, f.remote, "update-ref", ref, f.pushed)
+			case "archive-race":
+				changed := false
+				f.service.lsRemote = func(ctx context.Context, dir, remote, ref string) (string, error) {
+					head, err := git.LsRemote(ctx, dir, remote, ref)
+					if !changed {
+						changed = true
+						mustRun(t, f.service.GateDir, "update-ref", "-d", archive)
+					}
+					return head, err
+				}
+			}
+			state := f.service.Refresh(f.ctx)
+			if CanApply(state) || state.Safety == "gate_ready" {
+				t.Fatalf("damaged release evidence credited: %+v", state)
+			}
+			if applied := f.service.Apply(f.ctx); applied.Changed || CanApply(applied) {
+				t.Fatalf("unsafe sync: %+v", applied)
+			}
+			if scenario == "remote-changed" {
+				if recovered := f.service.Recover(f.ctx, false); recovered.Recovered {
+					t.Fatalf("changed publication silently rebound: %+v", recovered)
+				}
+			}
+			if head := mustRun(t, f.local, "rev-parse", "HEAD"); head != published {
+				t.Fatal("refusal moved caller")
+			}
+			run, err := f.db.GetRun(f.run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ptr(run.LastPushedSHA) != f.pushed || run.HeadSHA != f.run.HeadSHA || value(run.PushGeneration) != value(f.run.PushGeneration) {
+				t.Fatal("refusal rewrote push provenance")
+			}
+		})
 	}
 }
 

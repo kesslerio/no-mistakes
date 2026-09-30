@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
@@ -40,7 +39,6 @@ func (m *RunManager) HandleCustodyOperation(ctx context.Context, p *ipc.CustodyO
 		}
 		branches = append(branches, p.PublicationBranch)
 	}
-	sort.Strings(branches)
 	var result *ipc.CustodyOperationResult
 	action := func() (string, error) {
 		if m.shuttingDown.Load() {
@@ -188,12 +186,7 @@ func (m *RunManager) HandleCustodyOperation(ctx context.Context, p *ipc.CustodyO
 		err = executor.WhileParked(bind)
 		return run.ID, err
 	}
-	_, err = m.withBranchLock(run.RepoID, branches[0], func() (string, error) {
-		if len(branches) == 2 && branches[1] != branches[0] {
-			return m.withBranchLock(run.RepoID, branches[1], action)
-		}
-		return action()
-	})
+	_, err = m.withBranchLock(run.RepoID, branches[0], action, branches[1:]...)
 	if err == nil && result != nil {
 		if fresh, readErr := m.db.GetRun(result.RunID); readErr == nil && fresh != nil {
 			status := string(fresh.Status)
