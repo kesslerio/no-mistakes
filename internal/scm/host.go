@@ -399,7 +399,9 @@ type Host interface {
 }
 
 // PRHeadReader reads the current head of an existing PR by its durable identity.
-// Custody operations require this proof rather than an inferred local head.
+// It must also verify the source repository and branch against the configured
+// push target. Custody and rebound publication require this proof rather than
+// an inferred local head.
 type PRHeadReader interface {
 	GetPRHeadSHA(ctx context.Context, pr *PR, branch string) (string, error)
 }
