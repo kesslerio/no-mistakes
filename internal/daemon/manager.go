@@ -30,6 +30,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
 	"github.com/kunchenguid/no-mistakes/internal/runenv"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
@@ -55,7 +56,8 @@ type RunManager struct {
 	paths        *paths.Paths
 	steps        StepFactory
 
-	branchLocks sync.Map // repoID+"/"+branch → *sync.Mutex
+	publicationPR func(context.Context, *db.Repo, *db.Run, string, string) (*scm.PR, error) // test seam; nil uses provider
+	branchLocks   sync.Map                                                                  // repoID+"/"+branch → *sync.Mutex
 
 	// evalCaptureMu serializes automatic eval collection. Concurrent runs
 	// finishing together would otherwise write the same per-repository object
@@ -1385,6 +1387,12 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		}
 	}
 
+	if owner, err := m.db.PublicationOwner(repo.ID, branch, ""); err != nil {
+		return "", err
+	} else if owner != nil && owner.Branch != branch {
+		return "", fmt.Errorf("branch is reserved by publication run %s", owner.ID)
+	}
+
 	// Cancel any active run for this repo+branch.
 	m.cancelActiveRuns(repo.ID, branch)
 
@@ -1422,7 +1430,32 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 			trackStartFailure("inherit_pr_url")
 			return "", fmt.Errorf("inherit PR URL: %w", err)
 		}
+
 		run.PRURL = &inherited
+		prior, err := m.db.GetRunsByRepo(repo.ID)
+		if err != nil {
+			_ = m.db.UpdateRunError(run.ID, err.Error())
+			return "", err
+		}
+		for _, candidate := range prior {
+			if candidate.ID == run.ID || candidate.Branch != run.Branch {
+				continue
+			}
+			if candidate.PublicationBranch != nil && candidate.PRURL != nil && *candidate.PRURL == inherited {
+				if candidate.PublicationTargetFingerprint == nil {
+					err := fmt.Errorf("missing inherited publication target proof")
+					_ = m.db.UpdateRunError(run.ID, err.Error())
+					return "", err
+				}
+				if err := m.db.RebindPublication(repo, run, *candidate.PublicationBranch, inherited, *candidate.PublicationTargetFingerprint); err != nil {
+					_ = m.db.UpdateRunError(run.ID, err.Error())
+					return "", err
+				}
+				run.PublicationBranch = candidate.PublicationBranch
+				run.PublicationTargetFingerprint = candidate.PublicationTargetFingerprint
+			}
+			break
+		}
 	}
 
 	// Legacy launches retain their existing failed-row diagnostics on a bad

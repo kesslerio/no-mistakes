@@ -455,3 +455,64 @@ func TestExecutor_GateRecheckStopsAfterApprovalCancelAndShutdown(t *testing.T) {
 		})
 	}
 }
+
+func TestExecutorPublicationRebindRefusesGateAlreadyReconciled(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	e := NewExecutor(database, p, nil, nil, nil, nil)
+	e.waiting = true
+	e.waitingStep = types.StepCI
+	step := &reconcilingApprovalStep{name: types.StepCI}
+	step.resolved.Store(true)
+	resolved, err := e.reconcileApprovalGate(context.Background(), step, &StepContext{Run: run, Repo: repo}, "")
+	if !resolved || err != nil {
+		t.Fatalf("resolved=%v err=%v", resolved, err)
+	}
+	called := false
+	if err := e.WhileParked(func() error { called = true; return nil }); err == nil || called {
+		t.Fatal("rebind overtook the committed gate exit")
+	}
+}
+
+func TestExecutorPublicationRebindSerializesApprovalResponse(t *testing.T) {
+	database, p, _, _ := setupTest(t)
+	e := NewExecutor(database, p, nil, nil, nil, nil)
+	e.waiting = true
+	e.waitingStep = types.StepReview
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	bound := make(chan error, 1)
+	go func() { bound <- e.WhileParked(func() error { close(entered); <-release; return nil }) }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("parked operation did not enter")
+	}
+	responded := make(chan error, 1)
+	go func() { responded <- e.Respond(types.StepReview, types.ActionApprove, nil) }()
+	select {
+	case err := <-responded:
+		close(release)
+		t.Fatalf("approval passed the custody mutation: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-bound:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("binding did not complete")
+	}
+	select {
+	case err := <-responded:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("approval did not resume")
+	}
+	if err := e.WhileParked(func() error { return nil }); err == nil {
+		t.Fatal("binding admitted after approval")
+	}
+}

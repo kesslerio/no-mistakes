@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/custody"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -1109,6 +1110,11 @@ func TestRerunInheritsPRURLFromSelectedRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	previous, _ := d.GetRun(first.RunID)
+	repo, _ := d.GetRepo(previous.RepoID)
+	if err := d.RebindPublication(repo, previous, "existing", prURL, branchsync.TargetFingerprint(repo.PushURL())); err != nil {
+		t.Fatal(err)
+	}
 	var rerun ipc.RerunResult
 	err = client.Call(ipc.MethodRerun, &ipc.RerunParams{
 		RepoID:        "pr-url-rerun-repo",
@@ -1121,6 +1127,9 @@ func TestRerunInheritsPRURLFromSelectedRun(t *testing.T) {
 	got := waitForRunTerminalState(t, d, rerun.RunID)
 	if got.PRURL == nil || *got.PRURL != prURL {
 		t.Fatalf("rerun PRURL = %#v, want inherited %s", got.PRURL, prURL)
+	}
+	if got.PublicationBranch == nil || *got.PublicationBranch != "existing" || got.Branch != "main" || got.PublicationTargetFingerprint == nil {
+		t.Fatalf("lost inherited publication binding: %+v", got)
 	}
 }
 

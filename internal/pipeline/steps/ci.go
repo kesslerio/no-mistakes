@@ -108,6 +108,12 @@ func (s *CIStep) Name() types.StepName { return types.StepCI }
 // the normal CI polling loop. Open, unknown, and provider-error states remain
 // parked so reconciliation never guesses success.
 func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error) {
+	var publicationErr error
+	sctx, publicationErr = publicationContext(sctx)
+	if publicationErr != nil {
+		return false, publicationErr
+	}
+
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
 		return false, fmt.Errorf("%w: %w", pipeline.ErrFatalGateReconciliation, err)
 	}
@@ -183,6 +189,12 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 // reruns, or pushes anything, and it never blocks the approval itself - it
 // only decides how the resulting completion is recorded.
 func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, error) {
+	var publicationErr error
+	sctx, publicationErr = publicationContext(sctx)
+	if publicationErr != nil {
+		return "", publicationErr
+	}
+
 	ctx := sctx.Ctx
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -245,6 +257,12 @@ func verifyMergedProof(ctx context.Context, host scm.Host, pr *scm.PR, expectedH
 }
 
 func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutcome, err error) {
+	var publicationErr error
+	sctx, publicationErr = publicationContext(sctx)
+	if publicationErr != nil {
+		return nil, publicationErr
+	}
+
 	refusalFindings := ""
 	if sctx.StepResultID != "" {
 		stepResult, err := sctx.DB.GetStepResult(sctx.StepResultID)
