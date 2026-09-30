@@ -330,12 +330,18 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	provider := resolvedProvider(sctx)
 	host, skipReason := buildHost(sctx, provider)
 	if host == nil {
+		if sctx.Run.PublicationBranch != nil {
+			return nil, fmt.Errorf("rebound CI publication cannot be verified: %s", skipReason)
+		}
 		sctx.Log(fmt.Sprintf("skipping CI: %s", skipReason))
 		return &pipeline.StepOutcome{Skipped: true, SkipReason: skipReason}, nil
 	}
 	if err := host.Available(ctx); err != nil {
 		if pluginContractBroken(err) {
 			return nil, err
+		}
+		if sctx.Run.PublicationBranch != nil {
+			return nil, fmt.Errorf("rebound CI publication cannot be verified: %w", err)
 		}
 		sctx.Log(fmt.Sprintf("skipping CI: %v", err))
 		return &pipeline.StepOutcome{Skipped: true, SkipReason: err.Error()}, nil
@@ -355,6 +361,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		}
 	}
 	if prURL == "" {
+		if sctx.Run.PublicationBranch != nil {
+			return nil, fmt.Errorf("rebound CI publication cannot be verified: run has no PR URL")
+		}
 		sctx.Log("no PR URL found, skipping CI")
 		return &pipeline.StepOutcome{Skipped: true, SkipReason: "no PR URL found"}, nil
 	}

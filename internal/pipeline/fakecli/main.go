@@ -181,7 +181,16 @@ func fakeGHHandler(args []string) {
 			os.Exit(0)
 		}
 		number := extractTrailingNumber(prURL)
-		fmt.Printf("[{\"number\":%d,\"url\":%q,\"baseRefName\":%q}]\n", number, prURL, prBase)
+		head, _ := fakeCLIFlagValue(args, "--head")
+		repository := os.Getenv("FAKE_CLI_PR_HEAD_REPOSITORY")
+		if repository == "" {
+			parsed, _ := url.Parse(prURL)
+			parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+			if len(parts) >= 2 {
+				repository = parts[0] + "/" + parts[1]
+			}
+		}
+		fmt.Printf("[{\"number\":%d,\"url\":%q,\"baseRefName\":%q,\"headRefName\":%q,\"headRepository\":{\"nameWithOwner\":%q}}]\n", number, prURL, prBase, strings.TrimPrefix(head, "refs/heads/"), repository)
 		os.Exit(0)
 	}
 	if len(args) >= 2 && args[0] == "pr" && args[1] == "view" {

@@ -9,7 +9,9 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/forgecontext"
 	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/scm/github"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -40,7 +42,7 @@ func TestReboundPublicationPushesOnlyAppendOnlyToExistingBranch(t *testing.T) {
 				t.Fatal("fixture accidentally bypasses durable reload")
 			}
 			sctx.Env, _ = fakeGH(t, "https://github.com/test/repo/pull/1")
-			sctx.Env = append(sctx.Env, fmt.Sprintf(`FAKE_CLI_PR_LIST_JSON=[{"number":1,"url":"https://github.com/test/repo/pull/1","headRefName":"existing","headRepositoryOwner":{"login":%q}}]`, strings.Split(github.RepoSlug(remote), "/")[0]))
+			sctx.Env = append(sctx.Env, fmt.Sprintf(`FAKE_CLI_PR_LIST_JSON=[{"number":1,"url":"https://github.com/test/repo/pull/1","headRefName":"existing","headRepository":{"nameWithOwner":%q}}]`, github.RepoSlug(remote)))
 			sctx.Env = append(sctx.Env, "FAKE_CLI_PR_HEAD_SHA="+submitted)
 			sctx.Env = append(sctx.Env, fmt.Sprintf(`FAKE_CLI_PR_PUBLICATION_JSON={"headRefOid":%q,"headRefName":"existing","headRepository":{"nameWithOwner":%q}}`, submitted, github.RepoSlug(remote)))
 			recordReviewApproval(t, sctx, head)
@@ -197,5 +199,53 @@ func TestReboundCICreditsOnlyThePublishedRunHead(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestReboundCIRefusesAutomaticSkipWithoutPublicationProof(t *testing.T) {
+	for _, rebound := range []bool{false, true} {
+		for _, scenario := range []string{"provider", "authentication", "identity"} {
+			t.Run(fmt.Sprintf("rebound=%v/%s", rebound, scenario), func(t *testing.T) {
+				dir, base, head := setupGitRepo(t)
+				sctx := newTestContextWithDBRecords(t, nil, dir, base, head, config.Commands{})
+				sctx.Repo.URLsVerified = true
+				prURL := "https://github.com/test/repo/pull/42"
+				if rebound {
+					if err := sctx.DB.RebindPublication(sctx.Repo, sctx.Run, "existing", prURL, branchsync.TargetFingerprint(sctx.Repo.PushURL())); err != nil {
+						t.Fatal(err)
+					}
+				}
+				sctx.Env = fakeCIGH(t, "OPEN", `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`)
+				sctx.Env = append(sctx.Env, "FAKE_CLI_PR_HEAD_SHA="+base)
+				switch scenario {
+				case "provider":
+					sctx.ForgeContext = &forgecontext.Context{Provider: scm.ProviderUnknown}
+				case "authentication":
+					sctx.Env = append(sctx.Env, "FAKE_CLI_AUTH_ERR=authentication expired")
+				case "identity":
+					if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, ""); err != nil {
+						t.Fatal(err)
+					}
+				}
+				outcome, err := (&CIStep{}).Execute(sctx)
+				if rebound {
+					if err == nil || outcome != nil {
+						t.Fatalf("unproven rebound publication completed: %+v %v", outcome, err)
+					}
+					if !strings.Contains(err.Error(), "rebound CI publication cannot be verified") {
+						t.Fatal(err)
+					}
+				} else if err != nil || outcome == nil || !outcome.Skipped {
+					t.Fatalf("ordinary CI skip changed: %+v %v", outcome, err)
+				}
+				got, err := sctx.DB.GetRun(sctx.Run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.LastPushedSHA != nil || got.CIReadyAt != nil {
+					t.Fatalf("skip or refusal credited publication or CI: %+v", got)
+				}
+			})
+		}
 	}
 }
