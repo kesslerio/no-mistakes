@@ -2055,6 +2055,7 @@ func exactPushedBinding(repo *db.Repo, run *db.Run, branch string) bool {
 		run.LastPushedSHA != nil && run.HeadSHA == ptr(run.LastPushedSHA) &&
 		run.PushTargetKind != nil && ptr(run.PushTargetKind) == targetKind(repo) &&
 		run.PushTargetFingerprint != nil && ptr(run.PushTargetFingerprint) == TargetFingerprint(repo.PushURL()) &&
+		(run.PublicationBranch == nil || ptr(run.PublicationTargetFingerprint) == ptr(run.PushTargetFingerprint)) &&
 		run.PushRef != nil && ptr(run.PushRef) == "refs/heads/"+strings.TrimPrefix(run.PublishBranch(), "refs/heads/") &&
 		run.PushGeneration != nil
 }
@@ -2078,8 +2079,15 @@ func (s *Service) supersededUnpublishedRun(ctx context.Context, older, newer *db
 }
 
 func samePushTargetBinding(older, newer *db.Run) bool {
-	return older != nil && newer != nil &&
-		older.PushTargetKind != nil && newer.PushTargetKind != nil && ptr(older.PushTargetKind) == ptr(newer.PushTargetKind) &&
+	if older == nil || newer == nil {
+		return false
+	}
+	if older.PublicationBranch != nil {
+		return older.PublicationTargetFingerprint != nil && newer.PushTargetFingerprint != nil &&
+			ptr(older.PublicationTargetFingerprint) == ptr(newer.PushTargetFingerprint) &&
+			newer.PushRef != nil && ptr(newer.PushRef) == "refs/heads/"+strings.TrimPrefix(older.PublishBranch(), "refs/heads/")
+	}
+	return older.PushTargetKind != nil && newer.PushTargetKind != nil && ptr(older.PushTargetKind) == ptr(newer.PushTargetKind) &&
 		older.PushTargetFingerprint != nil && newer.PushTargetFingerprint != nil && ptr(older.PushTargetFingerprint) == ptr(newer.PushTargetFingerprint) &&
 		older.PushRef != nil && newer.PushRef != nil && ptr(older.PushRef) == ptr(newer.PushRef)
 }
