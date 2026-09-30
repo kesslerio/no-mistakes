@@ -285,6 +285,15 @@ func buildPluginHost(sctx *pipeline.StepContext, name string, cmdFactory plugin.
 	}), ""
 }
 
+// PublicationHost shares the pipeline's provider, repository and fork routing
+// with explicit custody/publication operations. Unsupported routing refuses.
+func PublicationHost(sctx *pipeline.StepContext) (scm.Host, string) {
+	scopedCtx, scopedRepo := *sctx, *sctx.Repo
+	scopedRepo.URLsVerified = true
+	scopedCtx.Repo = &scopedRepo
+	return buildHost(&scopedCtx, resolvedProvider(&scopedCtx))
+}
+
 func detectProviderForStep(sctx *pipeline.StepContext, remoteURL string) scm.Provider {
 	return scm.DetectProviderContextWithForgejoBaseURL(sctx.Ctx, remoteURL, forgejoBaseURLForStep(sctx))
 }

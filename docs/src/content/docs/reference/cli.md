@@ -518,6 +518,36 @@ no-mistakes attach [--run <id>]
 
 Opens the TUI for the active run anywhere in the current repo. If `--run` is specified, attaches to that specific run regardless of branch. Unlike bare `no-mistakes`, this does not stay branch-scoped before falling back.
 
+## no-mistakes custody release / reconcile
+
+Return a terminal run's custody at the exact head of an existing open PR, including a missing or stale gate branch. Run from the registered, checked-out custody branch and select its latest run explicitly:
+
+```sh
+no-mistakes custody release --run <run-id>
+no-mistakes axi custody reconcile --run <run-id>
+```
+
+Both command families print structured TOON. `reconcile` uses the same preservation protocol as `release`, and additionally requires a failed run with an exact historical daemon shutdown, restart, or crash diagnostic. Neither command stops or restarts the daemon. A run with a live executor must finish first; terminal records and their original errors remain as history.
+
+The caller must be clean, and its HEAD, existing remote branch and open PR head must agree. The daemon archives every available terminal-stack head, submitted head, last pushed head, managed-worktree head and prior gate head under immutable `refs/no-mistakes/release/<run-id>/<sha>` refs in the registered gate. A Git ref transaction verifies those archives before it restores only the private gate branch. A database transaction fences the selected run, heads, push generations and configured target before stamping custody returned. A crash between those operations is retryable; successful retries are idempotent. Caller files, caller branch and public history remain unchanged.
+
+Release refuses a missing recorded head, uncommitted managed work, a live source or publication owner, a default branch, symbolic or conflicting evidence, or a generation/target/head that changes during proof. Available unpublished commits stay archived; the command never discards an unavailable commit to bypass a refusal. Existing `sync --recover` and its explicit keep-local path retain their own recovery semantics.
+
+After success, a fresh `no-mistakes axi run --intent "..."` can adopt the existing branch. The current exact-PR-head reader supports GitHub, including configured GitHub fork routing; providers without that capability refuse safely.
+
+## no-mistakes publication rebind
+
+Change a run's publication destination to an existing open PR branch without renaming its custody branch or fabricating successful-push evidence:
+
+```sh
+no-mistakes publication rebind --run <run-id> --branch <existing-pr-branch>
+no-mistakes axi publication rebind --run <run-id> --branch <existing-pr-branch>
+```
+
+Run from that run's registered custody branch. A live run must be parked at an approval gate; a terminal run must have no executor still finishing. The daemon verifies the existing PR, configured push target, exact live remote head and its ancestry in the recorded managed head. Another active publisher, a default branch, a missing/retired PR, unverifiable evidence, or a destination that requires history rewrite refuses without changing the binding.
+
+The operation itself never pushes or changes caller files. Push, PR and CI read the durable destination when they resume. Rebound pushes permit only append-only updates, with an explicit remote-head lease that also rejects deletion or replacement between verification and publication. They never create a new branch or replacement PR. A supported rerun carrying the same inherited PR URL keeps the destination; changing repository routing invalidates its target proof. `axi status` reports `publication_branch` separately from the original custody `branch`.
+
 ## no-mistakes rerun
 
 Rerun the pipeline for the current branch.

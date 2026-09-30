@@ -62,6 +62,8 @@ type Executor struct {
 	shared   *RunShared
 	workDir  string
 
+	publicationSettling    bool       // guarded by mu; a reconciler has committed to leaving its gate
+	publicationMu          sync.Mutex // serializes parked destination changes and reconciliation
 	mu                     sync.Mutex
 	approvalCh             chan approvalResponse // buffered channel for approval responses
 	waiting                bool                  // true when blocked on approval
@@ -158,6 +160,19 @@ func (e *Executor) SetGateReconcileTimings(interval, timeout time.Duration) {
 // Returns an error if no step is awaiting approval or if the step name doesn't match.
 func (e *Executor) Respond(step types.StepName, action types.ApprovalAction, findingIDs []string) error {
 	return e.RespondWithOverrides(step, action, findingIDs, nil, nil, "")
+}
+
+// WhileParked serializes destination rebinding with explicit responses and
+// automatic gate release. It never interrupts an executing pipeline step.
+func (e *Executor) WhileParked(action func() error) error {
+	e.publicationMu.Lock()
+	defer e.publicationMu.Unlock()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.waiting || e.publicationSettling {
+		return fmt.Errorf("run is executing; publication rebinding requires a parked approval gate")
+	}
+	return action()
 }
 
 // RespondWithOverrides is like Respond but also carries per-finding user
@@ -513,6 +528,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 
 	e.mu.Lock()
+	e.publicationSettling = false
 	e.waiting = true
 	e.waitingStep = gate.step.Name()
 	e.waitingApprovalRefusal = approvalRefusal(gate.step.Name(), gate.findings)
@@ -1338,6 +1354,7 @@ rounds:
 			// emitting events, so that callers who poll the DB status can
 			// immediately call Respond once they see it.
 			e.mu.Lock()
+			e.publicationSettling = false
 			e.waiting = true
 			e.waitingStep = stepName
 			e.waitingApprovalRefusal = approvalRefusal(stepName, effectiveFindings)
@@ -1865,6 +1882,8 @@ func (e *Executor) resumeApprovalGate(ctx context.Context, step Step, sctx *Step
 }
 
 func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *StepContext, findingsJSON string) (bool, error) {
+	e.publicationMu.Lock()
+	defer e.publicationMu.Unlock()
 	reconciler, ok := step.(ApprovalGateReconciler)
 	if !ok {
 		return false, nil
@@ -1880,7 +1899,13 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 	defer cancel()
 	copyCtx := *sctx
 	copyCtx.Ctx = reconcileCtx
-	return reconciler.ReconcileApprovalGate(&copyCtx)
+	resolved, err := reconciler.ReconcileApprovalGate(&copyCtx)
+	if resolved || errors.Is(err, ErrFatalGateReconciliation) {
+		e.mu.Lock()
+		e.publicationSettling = true
+		e.mu.Unlock()
+	}
+	return resolved, err
 }
 
 // failRun marks a run as failed and returns the error.

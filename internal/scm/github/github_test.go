@@ -1997,3 +1997,23 @@ func TestGetPRContentRequiresExplicitStrings(t *testing.T) {
 		t.Fatalf("explicit empty body rejected: %+v, %v", got, err)
 	}
 }
+
+func TestGetPRHeadSHARequiresExplicitIdentityAndNonemptyRead(t *testing.T) {
+	t.Parallel()
+	for _, head := range []string{"published-head", ""} {
+		t.Run(head, func(t *testing.T) {
+			host := New(githubTestCmdFactory(map[string]githubTestResponse{"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: head}}), nil, "", "test/repo")
+			got, err := host.GetPRHeadSHA(context.Background(), &scm.PR{Number: "123", URL: "https://github.com/test/repo/pull/123"})
+			if head == "" {
+				if err == nil {
+					t.Fatal("empty provider proof accepted")
+				}
+			} else if err != nil || got != head {
+				t.Fatalf("head=%s err=%v", got, err)
+			}
+			if _, err := host.GetPRHeadSHA(context.Background(), &scm.PR{}); err == nil {
+				t.Fatal("cwd-inferred PR identity accepted")
+			}
+		})
+	}
+}

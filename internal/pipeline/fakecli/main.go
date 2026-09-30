@@ -96,6 +96,12 @@ func handleFakeCLI(mode string) {
 		fakeCIGlabSequenceHandler(args)
 	case "ci-gh-reconcile":
 		fakeCIGHReconcileHandler(args)
+	case "gh-with-intervening-push":
+		if strings.TrimSuffix(filepath.Base(os.Args[0]), filepath.Ext(os.Args[0])) == "git" {
+			fakeGitInterveningPushPassthroughHandler(args)
+		} else {
+			fakeGHHandler(args)
+		}
 	case "ci-gh-with-intervening-push":
 		// A single step invocation can need both a faked gh (for the PR
 		// attestation write) and a faked git (to inject a push-time race) in
@@ -179,6 +185,10 @@ func fakeGHHandler(args []string) {
 		os.Exit(0)
 	}
 	if len(args) >= 2 && args[0] == "pr" && args[1] == "view" {
+		if strings.Contains(strings.Join(args, " "), "--json headRefOid") {
+			fmt.Println(fakePRHeadSHA())
+			os.Exit(0)
+		}
 		if strings.Contains(strings.Join(args, " "), "--json state") {
 			state := os.Getenv("FAKE_CLI_PR_STATE")
 			if state == "" {

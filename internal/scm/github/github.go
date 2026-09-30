@@ -760,6 +760,14 @@ func (h *Host) checkStartedAfter(a, b scm.Check) (bool, bool) {
 	return false, false
 }
 
+func (h *Host) GetPRHeadSHA(ctx context.Context, pr *scm.PR) (string, error) {
+	selector, err := prSelector(pr)
+	if err != nil {
+		return "", err
+	}
+	return h.getPRHeadSHA(ctx, selector)
+}
+
 func (h *Host) getPRHeadSHA(ctx context.Context, selector string) (string, error) {
 	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
 	args = append(args, "--json", "headRefOid", "--jq", ".headRefOid")

@@ -1,0 +1,251 @@
+package daemon
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/types"
+)
+
+func custodyManagerFixture(t *testing.T) (*RunManager, *ipc.CustodyOperationParams, string) {
+	t.Helper()
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	d, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	repo, base := setupTestGitRepo(t, p, d, "custody-repo")
+	remote := filepath.Join(t.TempDir(), "published.git")
+	gitCmd(t, "", "clone", "--bare", repo.WorkingPath, remote)
+	repo, err = d.UpdateRepoMetadata(repo.ID, remote, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "checkout", "-b", "validation")
+	gitCmd(t, repo.WorkingPath, "commit", "--allow-empty", "-m", "validated descendant")
+	head := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	gitCmd(t, repo.WorkingPath, "push", remote, base+":refs/heads/existing")
+	gitCmd(t, repo.WorkingPath, "push", p.RepoDir(repo.ID), "HEAD:refs/heads/validation")
+	run, err := d.InsertRun(repo.ID, "validation", head, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetRunWorktreeDir(run.ID, repo.WorkingPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatusWithVerifiedHead(run.ID, types.RunFailed, head); err != nil {
+		t.Fatal(err)
+	}
+	m := NewRunManager(d, p, nil)
+	m.publicationPR = func(_ context.Context, _ *db.Repo, _ *db.Run, _ string, branch string) (*scm.PR, error) {
+		return &scm.PR{URL: "https://github.com/test/repo/pull/1", HeadSHA: base}, nil
+	}
+	return m, &ipc.CustodyOperationParams{Action: "rebind", RepoID: repo.ID, RunID: run.ID, WorkDir: repo.WorkingPath, HeadSHA: head, PublicationBranch: "existing"}, remote
+}
+
+func TestCustodyManagerRebindsParkedLiveRunWithoutRenamingCustody(t *testing.T) {
+	m, p, remote := custodyManagerFixture(t)
+	run, _ := m.db.GetRun(p.RunID)
+	repo, _ := m.db.GetRepo(p.RepoID)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	e := pipeline.NewExecutor(m.db, m.paths, config.Merge(config.DefaultGlobalConfig(), &config.RepoConfig{}), nil, []pipeline.Step{&mockApprovalStep{name: types.StepReview}}, nil)
+	m.executors[run.ID] = e
+	done := make(chan error, 1)
+	go func() { done <- e.Execute(ctx, run, repo, p.WorkDir) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("executor did not stop")
+		}
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		r, _ := m.db.GetRun(run.ID)
+		if r.AwaitingAgentSince != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("run did not park")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	result, err := m.HandleCustodyOperation(context.Background(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State != "confirmed" || result.Branch != "existing" {
+		t.Fatalf("result=%+v", result)
+	}
+	r, _ := m.db.GetRun(run.ID)
+	if r.Branch != "validation" || r.PublishBranch() != "existing" || r.LastPushedSHA != nil {
+		t.Fatalf("binding=%+v", r)
+	}
+	if got := gitOutput(t, p.WorkDir, "rev-parse", "HEAD"); got != p.HeadSHA {
+		t.Fatal("caller was moved")
+	}
+	if got := gitOutput(t, remote, "rev-parse", "refs/heads/existing"); got != result.HeadSHA {
+		t.Fatal("rebind published or rewrote history")
+	}
+}
+
+func TestCustodyManagerPublicationRefusals(t *testing.T) {
+	for _, scenario := range []string{"missing-branch", "missing-pr", "rewrite", "default-branch", "wrong-head", "wrong-run", "active-unparked", "dirty-release"} {
+		t.Run(scenario, func(t *testing.T) {
+			m, p, remote := custodyManagerFixture(t)
+			switch scenario {
+			case "missing-branch":
+				gitCmd(t, remote, "update-ref", "-d", "refs/heads/existing")
+			case "missing-pr":
+				m.publicationPR = func(context.Context, *db.Repo, *db.Run, string, string) (*scm.PR, error) { return nil, os.ErrNotExist }
+			case "rewrite":
+				gitCmd(t, p.WorkDir, "checkout", "--orphan", "different")
+				gitCmd(t, p.WorkDir, "commit", "--allow-empty", "-m", "different history")
+				other := gitOutput(t, p.WorkDir, "rev-parse", "HEAD")
+				gitCmd(t, p.WorkDir, "push", "--force", remote, "HEAD:refs/heads/existing")
+				gitCmd(t, p.WorkDir, "checkout", "validation")
+				m.publicationPR = func(context.Context, *db.Repo, *db.Run, string, string) (*scm.PR, error) {
+					return &scm.PR{URL: "https://github.com/test/repo/pull/1", HeadSHA: other}, nil
+				}
+			case "default-branch":
+				p.PublicationBranch = "main"
+			case "wrong-head":
+				p.HeadSHA = strings.Repeat("a", 40)
+			case "wrong-run":
+				p.RunID = "not-owned"
+			case "active-unparked":
+				_ = m.db.UpdateRunStatus(p.RunID, types.RunRunning)
+				m.executors[p.RunID] = pipeline.NewExecutor(m.db, m.paths, nil, nil, nil, nil)
+			case "dirty-release":
+				p.Action = "release"
+				if err := os.WriteFile(filepath.Join(p.WorkDir, "uncommitted"), []byte("work"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := gitOutput(t, m.paths.RepoDir(p.RepoID), "rev-parse", "refs/heads/validation")
+			if _, err := m.HandleCustodyOperation(context.Background(), p); err == nil {
+				t.Fatal("unsafe operation accepted")
+			}
+			if got := gitOutput(t, m.paths.RepoDir(p.RepoID), "rev-parse", "refs/heads/validation"); got != before {
+				t.Fatal("gate changed on refusal")
+			}
+			runs, _ := m.db.GetRunsByRepo(p.RepoID)
+			for _, r := range runs {
+				if r.PublicationBranch != nil || r.CustodyReturnedAt != nil {
+					t.Fatalf("ownership changed on refusal: %+v", r)
+				}
+			}
+		})
+	}
+}
+
+func TestCustodyManagerReleaseAndReconcilePublishedRestart(t *testing.T) {
+	for _, action := range []string{"release", "reconcile"} {
+		t.Run(action, func(t *testing.T) {
+			m, p, remote := custodyManagerFixture(t)
+			p.Action = action
+			gitCmd(t, p.WorkDir, "push", remote, p.HeadSHA+":refs/heads/validation")
+			run, _ := m.db.GetRun(p.RunID)
+			if err := m.db.UpdateRunErrorStatusWithVerifiedHead(run.ID, "daemon crashed during execution", types.RunFailed, p.HeadSHA); err != nil {
+				t.Fatal(err)
+			}
+			m.publicationPR = func(context.Context, *db.Repo, *db.Run, string, string) (*scm.PR, error) {
+				return &scm.PR{URL: "https://github.com/test/repo/pull/1", HeadSHA: p.HeadSHA}, nil
+			}
+			result, err := m.HandleCustodyOperation(context.Background(), p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, _ := m.db.GetRun(p.RunID)
+			if result.State != "released" || r.CustodyReturnedAt == nil || r.Error == nil || *r.Error != "daemon crashed during execution" || r.HeadSHA != p.HeadSHA {
+				t.Fatalf("lost restart history: %+v", r)
+			}
+			if got := gitOutput(t, remote, "rev-parse", "refs/heads/validation"); got != p.HeadSHA {
+				t.Fatal("published history changed")
+			}
+			if got := gitOutput(t, m.paths.RepoDir(p.RepoID), "rev-parse", "refs/no-mistakes/release/"+r.ID+"/"+p.HeadSHA); got != p.HeadSHA {
+				t.Fatal("archive missing")
+			}
+		})
+	}
+}
+
+func TestCustodyManagerRebindRefusesChangedGenerationOrProvider(t *testing.T) {
+	for _, scenario := range []string{"head", "target", "default", "registration", "pr", "other-publisher"} {
+		t.Run(scenario, func(t *testing.T) {
+			m, p, _ := custodyManagerFixture(t)
+			calls := 0
+			original := m.publicationPR
+			m.publicationPR = func(ctx context.Context, repo *db.Repo, r *db.Run, dir, branch string) (*scm.PR, error) {
+				calls++
+				pr, err := original(ctx, repo, r, dir, branch)
+				if calls == 2 {
+					switch scenario {
+					case "head":
+						_ = m.db.UpdateRunHeadSHA(r.ID, r.BaseSHA)
+					case "default":
+						_, err = m.db.UpdateRepoMetadata(repo.ID, repo.UpstreamURL, "existing")
+					case "registration":
+						_, err = m.db.UpdateRepoWorkingPath(repo.ID, filepath.Join(t.TempDir(), "different"))
+					case "target":
+						_, err = m.db.UpdateRepoMetadata(repo.ID, "https://github.com/other/repo", "main")
+					case "pr":
+						pr.URL = "https://github.com/test/repo/pull/2"
+					case "other-publisher":
+						_, err = m.db.InsertRun(repo.ID, "existing", r.HeadSHA, r.BaseSHA)
+					}
+				}
+				return pr, err
+			}
+			if _, err := m.HandleCustodyOperation(context.Background(), p); err == nil {
+				t.Fatal("stale publication binding accepted")
+			}
+			r, _ := m.db.GetRun(p.RunID)
+			if r.PublicationBranch != nil || r.LastPushedSHA != nil {
+				t.Fatal("refusal changed provenance")
+			}
+		})
+	}
+}
+
+func TestCustodyReleaseRefusesPRChangedWhileArchiving(t *testing.T) {
+	m, p, remote := custodyManagerFixture(t)
+	p.Action = "release"
+	gitCmd(t, p.WorkDir, "push", remote, p.HeadSHA+":refs/heads/validation")
+	calls := 0
+	m.publicationPR = func(context.Context, *db.Repo, *db.Run, string, string) (*scm.PR, error) {
+		calls++
+		url := "https://github.com/test/repo/pull/1"
+		if calls > 1 {
+			url = "https://github.com/test/repo/pull/2"
+		}
+		return &scm.PR{URL: url, HeadSHA: p.HeadSHA}, nil
+	}
+	before := gitOutput(t, m.paths.RepoDir(p.RepoID), "rev-parse", "refs/heads/validation")
+	if _, err := m.HandleCustodyOperation(context.Background(), p); err == nil {
+		t.Fatal("changed PR identity accepted")
+	}
+	r, _ := m.db.GetRun(p.RunID)
+	if r.CustodyReturnedAt != nil {
+		t.Fatal("stale PR returned custody")
+	}
+	if got := gitOutput(t, m.paths.RepoDir(p.RepoID), "rev-parse", "refs/heads/validation"); got != before {
+		t.Fatal("gate moved after PR changed")
+	}
+}
