@@ -215,17 +215,25 @@ type publicationFinder interface {
 
 // publicationPRIdentity chooses the PR a custody operation must verify. A run
 // that rebound publication is bound to the PR it recorded, so that identity
-// wins whenever it has one. Discovery searches by branch alone, so a sibling
-// open PR on the same source branch - a second PR at a different base, say -
-// can be returned instead, and refusing on that sibling would strand custody
-// in a lane whose PR is open at the exact published head. Binding already
-// prefers a still-open recorded PR over a discovered sibling, and release and
-// reconcile have to agree with it or they read a different PR than the one
-// they published to. A run that never recorded a destination keeps the
-// discovery answer, and a failed lookup still refuses rather than guessing.
+// wins for the branch it was recorded against. Discovery searches by branch
+// alone, so a sibling open PR on the same source branch - a second PR at a
+// different base, say - can be returned instead, and refusing on that sibling
+// would strand custody in a lane whose PR is open at the exact published head.
+// Binding already prefers a still-open recorded PR over a discovered sibling,
+// and release and reconcile have to agree with it or they read a different PR
+// than the one they published to. A rebind names a branch the run is not bound
+// to yet, which is a request for that branch's PR, so there discovery stands;
+// so it stands for a run that never recorded a destination at all. A failed
+// lookup with nothing to fall back on refuses rather than guessing.
 func publicationPRIdentity(ctx context.Context, host publicationFinder, run *db.Run, branch string) (*scm.PR, error) {
 	recorded := ""
-	if run != nil && run.PRURL != nil {
+	// PublishBranch is the branch this run's recorded URL was published to, so
+	// it is the only branch on which that URL may outrank a fresh lookup. Were
+	// the preference keyed on the URL alone, a parked run that already has a PR
+	// could never rebind to a different one: the stale identity would be
+	// returned, the head proof would compare it against the requested branch,
+	// and a valid rebind would refuse.
+	if run != nil && run.PRURL != nil && run.PublishBranch() == branch {
 		recorded = strings.TrimSpace(*run.PRURL)
 	}
 	pr, err := host.FindPR(ctx, branch, "")
