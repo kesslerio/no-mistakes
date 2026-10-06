@@ -1188,6 +1188,9 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	// selected run's decision is inherited and this rerun can only add to it.
 	// The locked start then folds in the operator's live global default, which
 	// likewise can only add omission, never remove it.
+	// Closing references are structured run metadata and survive reruns: an
+	// explicit request is added to, never replaces, what the selected run carried.
+	closingIssues = append(append([]string(nil), selectedRun.ClosingIssueRefs...), closingIssues...)
 	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource, storedPRBaseBranch, selectedRun.OmitIntent || omitIntent, selectedRun, planID, closingIssues, profiles...)
 }
 
