@@ -19,7 +19,12 @@ import (
 func TestReboundPublicationPushesOnlyAppendOnlyToExistingBranch(t *testing.T) {
 	for _, scenario := range []string{"append", "advanced-managed", "rewrite", "missing", "advanced", "deleted-during-push", "closed-pr", "foreign-pr", "changed-target"} {
 		t.Run(scenario, func(t *testing.T) {
-			remote := t.TempDir()
+			remote := filepath.ToSlash(t.TempDir())
+			// The publication identity is a slug derived from the fork URL, and
+			// a Windows temp path has no `/` after its drive letter, so the slug
+			// comes out empty and every provider read refuses. Register the same
+			// directory with forward slashes: the slug is then the same string on
+			// every platform, and Git accepts either form as a local remote.
 			gitCmd(t, remote, "init", "--bare")
 			dir, base, submitted := setupGitRepo(t)
 			gitCmd(t, dir, "push", remote, "refs/heads/main:refs/heads/main")
