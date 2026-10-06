@@ -206,6 +206,41 @@ func (m *RunManager) HandleCustodyOperation(ctx context.Context, p *ipc.CustodyO
 	return result, err
 }
 
+// publicationFinder is the part of a provider that custody needs in order to
+// choose which PR to verify. It is its own interface so the identity choice is
+// testable without a provider binary, a daemon fixture, or a real repository.
+type publicationFinder interface {
+	FindPR(ctx context.Context, branch, base string) (*scm.PR, error)
+}
+
+// publicationPRIdentity chooses the PR a custody operation must verify. A run
+// that rebound publication is bound to the PR it recorded, so that identity
+// wins whenever it has one. Discovery searches by branch alone, so a sibling
+// open PR on the same source branch - a second PR at a different base, say -
+// can be returned instead, and refusing on that sibling would strand custody
+// in a lane whose PR is open at the exact published head. Binding already
+// prefers a still-open recorded PR over a discovered sibling, and release and
+// reconcile have to agree with it or they read a different PR than the one
+// they published to. A run that never recorded a destination keeps the
+// discovery answer, and a failed lookup still refuses rather than guessing.
+func publicationPRIdentity(ctx context.Context, host publicationFinder, run *db.Run, branch string) (*scm.PR, error) {
+	recorded := ""
+	if run != nil && run.PRURL != nil {
+		recorded = strings.TrimSpace(*run.PRURL)
+	}
+	pr, err := host.FindPR(ctx, branch, "")
+	if recorded != "" {
+		if err == nil && pr != nil && pr.URL != "" && pr.URL == recorded {
+			return pr, nil
+		}
+		return &scm.PR{URL: recorded}, nil
+	}
+	if err != nil || pr == nil || pr.URL == "" {
+		return nil, fmt.Errorf("publication requires an existing open PR on the configured target branch")
+	}
+	return pr, nil
+}
+
 func (m *RunManager) existingPublicationPR(ctx context.Context, repo *db.Repo, run *db.Run, dir, branch string) (*scm.PR, error) {
 	if m.publicationPR != nil {
 		return m.publicationPR(ctx, repo, run, dir, branch)
@@ -225,9 +260,9 @@ func (m *RunManager) existingPublicationPR(ctx context.Context, repo *db.Repo, r
 	if host == nil {
 		return nil, fmt.Errorf("publication provider unavailable: %s", reason)
 	}
-	pr, err := host.FindPR(ctx, branch, "")
-	if err != nil || pr == nil || pr.URL == "" {
-		return nil, fmt.Errorf("publication requires an existing open PR on the configured target branch")
+	pr, err := publicationPRIdentity(ctx, host, run, branch)
+	if err != nil {
+		return nil, err
 	}
 	state, err := host.GetPRState(ctx, pr)
 	if err != nil || state != scm.PRStateOpen {

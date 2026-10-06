@@ -417,3 +417,90 @@ func TestCustodyReleaseRefusesPRChangedWhileArchiving(t *testing.T) {
 		t.Fatal("gate moved after PR changed")
 	}
 }
+
+// recordedPublicationFinder answers a branch search with whatever the provider
+// would surface today, which is how a sibling open PR on the same source branch
+// reaches a custody operation ahead of the PR the run actually published to.
+type recordedPublicationFinder struct {
+	discovered *scm.PR
+	err        error
+	calls      int
+}
+
+func (f *recordedPublicationFinder) FindPR(context.Context, string, string) (*scm.PR, error) {
+	f.calls++
+	return f.discovered, f.err
+}
+
+func TestPublicationPRIdentityPrefersTheRunRecordedPR(t *testing.T) {
+	const recorded = "https://github.com/owner/fork/pull/7"
+	recordedRun := func() *db.Run {
+		url := recorded
+		return &db.Run{PRURL: &url}
+	}
+	for _, tc := range []struct {
+		name    string
+		run     *db.Run
+		finder  *recordedPublicationFinder
+		wantURL string
+		wantErr string
+	}{
+		{
+			// The regression: a second open PR from the same source branch, at a
+			// different base, used to be the PR release and reconcile verified,
+			// and its URL check refused custody even though the recorded PR was
+			// open at the exact published head.
+			name:    "sibling does not block the recorded identity",
+			run:     recordedRun(),
+			finder:  &recordedPublicationFinder{discovered: &scm.PR{URL: "https://github.com/owner/fork/pull/9", HeadSHA: "head"}},
+			wantURL: recorded,
+		},
+		{
+			name:    "the discovered PR is used when it is the recorded one",
+			run:     recordedRun(),
+			finder:  &recordedPublicationFinder{discovered: &scm.PR{URL: recorded, HeadSHA: "head"}},
+			wantURL: recorded,
+		},
+		{
+			// A failed listing is not a reason to refuse a run that can name its
+			// own PR: the caller still proves that PR open and at the head.
+			name:    "a failed lookup does not outrank the recorded identity",
+			run:     recordedRun(),
+			finder:  &recordedPublicationFinder{err: context.DeadlineExceeded},
+			wantURL: recorded,
+		},
+		{
+			// A run that never rebound has nothing recorded, so discovery is all
+			// there is and a failed lookup still refuses rather than guessing.
+			name:    "discovery stands with nothing recorded",
+			run:     &db.Run{},
+			finder:  &recordedPublicationFinder{discovered: &scm.PR{URL: "https://github.com/owner/fork/pull/3", HeadSHA: "head"}},
+			wantURL: "https://github.com/owner/fork/pull/3",
+		},
+		{
+			name:    "a failed lookup refuses with nothing recorded",
+			run:     &db.Run{},
+			finder:  &recordedPublicationFinder{err: context.DeadlineExceeded},
+			wantErr: "publication requires an existing open PR",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := publicationPRIdentity(context.Background(), tc.finder, tc.run, "feature")
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("got err %v, want a refusal containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("choose publication PR: %v", err)
+			}
+			if got.URL != tc.wantURL {
+				t.Fatalf("identity = %q, want %q", got.URL, tc.wantURL)
+			}
+			if tc.finder.calls != 1 {
+				t.Fatalf("FindPR calls = %d, want one branch lookup", tc.finder.calls)
+			}
+		})
+	}
+}
