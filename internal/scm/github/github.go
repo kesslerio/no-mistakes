@@ -29,6 +29,14 @@ type Host struct {
 	repo         string // "owner/name" slug for --repo; empty when unknown
 	forkOwner    string // fork owner for cross-repository PR heads
 	draft        bool   // open created PRs as drafts (gh pr create --draft)
+	// lintPRBodies runs pr-body-lint before gh pr create/edit. Production
+	// enables it. Tests leave it off unless they opt in, so an ambient
+	// pr-body-lint on PATH cannot change unrelated publication tests.
+	lintPRBodies bool
+	// stepLog records operator-visible notes in the pipeline step log.
+	stepLog func(string)
+	// workDir is the checkout pr-body-lint receives as --cwd.
+	workDir string
 	// assetHTTP and assetUploadPrefix override the unofficial user-attachments
 	// upload transport in tests. Production leaves both nil/empty and uses
 	// http.DefaultClient against uploads.github.com (or uploads.<ghec-host>).
@@ -52,6 +60,7 @@ func New(cmd CmdFactory, cliAvailable func() bool, host, repo string) *Host {
 		cliAvailable: cliAvailable,
 		host:         strings.TrimSpace(host),
 		repo:         strings.TrimSpace(repo),
+		lintPRBodies: defaultLintPRBodies(),
 	}
 }
 
@@ -333,6 +342,9 @@ func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PR
 	if h.draft {
 		args = append(args, "--draft")
 	}
+	if err := h.lintPRBody(ctx, "create", content.Body); err != nil {
+		return nil, err
+	}
 	args = append(args, "--title", content.Title, "--body-file", "-")
 	cmd := h.cmd(ctx, "gh", args...)
 	cmd.Stdin = strings.NewReader(content.Body)
@@ -351,6 +363,9 @@ func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PR
 func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) (*scm.PR, error) {
 	selector, err := prSelector(pr)
 	if err != nil {
+		return nil, err
+	}
+	if err := h.lintPRBody(ctx, "edit", content.Body); err != nil {
 		return nil, err
 	}
 	args := append([]string{"pr", "edit", selector}, h.repoArgs()...)
