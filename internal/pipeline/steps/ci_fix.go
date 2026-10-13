@@ -183,7 +183,7 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 	const maxLogBytes = 32 * 1024
 	var logOutput string
 	if host.Capabilities().FailedCheckLogs {
-		logOutput = fetchCILogOutput(ctx, host, pr, sctx.Run.Branch, sctx.Run.HeadSHA, targets.Checks, maxLogBytes)
+		logOutput = fetchCILogOutput(ctx, host, pr, sctx.Run.PublicationBranch(), sctx.Run.HeadSHA, targets.Checks, maxLogBytes)
 	}
 
 	// Build prompt based on what issues are present

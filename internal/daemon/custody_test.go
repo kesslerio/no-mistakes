@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -411,6 +413,17 @@ func TestCustodySettlesTerminalStack(t *testing.T) {
 	for _, action := range []string{"release", "reconcile", "rebind"} {
 		t.Run(action, func(t *testing.T) {
 			f := newCustodyFixture(t)
+			gitCmd(t, f.wt, "-c", "user.name=Test", "-c", "user.email=test@test.com", "commit", "--allow-empty", "-m", "unpublished custody work")
+			head := gitOutput(t, f.wt, "rev-parse", "HEAD")
+			if err := f.d.UpdateRunErrorStatusWithVerifiedHead(f.run.ID, "failure", types.RunFailed, head); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, f.gate, "update-ref", "refs/heads/source", head)
+			gitCmd(t, f.remote, "fetch", f.gate, head)
+			gitCmd(t, f.remote, "update-ref", "refs/heads/source", head)
+			gitCmd(t, f.remote, "update-ref", "refs/heads/destination", head)
+			f.host.pr.HeadSHA = head
+			f.head = head
 			prior, err := f.d.InsertRun(f.repo.ID, "source", f.head, f.head)
 			if err != nil {
 				t.Fatal(err)
@@ -446,7 +459,20 @@ func TestCustodyFreshLaunchDoesNotInheritDestination(t *testing.T) {
 	if _, err := f.m.HandleCustody(context.Background(), f.params); err != nil {
 		t.Fatal(err)
 	}
-	f.host.state = scm.PRStateClosed
+	successor, err := f.d.InsertRun(f.repo.ID, "source", f.head, f.head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := db.PublicationBinding{Branch: "destination", PRURL: f.host.pr.URL, Target: "target", SourceRun: f.run.ID}
+	if err := f.d.SetRunPublicationDestination(successor.ID, binding); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.UpdateRunPRURL(successor.ID, f.host.pr.URL); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.UpdateRunStatus(successor.ID, types.RunCompleted); err != nil {
+		t.Fatal(err)
+	}
 	observed := make(chan *db.Run, 1)
 	f.m.steps = func() []pipeline.Step { return []pipeline.Step{&custodySuccessorStep{observed: observed}} }
 	bin := t.TempDir()
@@ -455,7 +481,7 @@ func TestCustodyFreshLaunchDoesNotInheritDestination(t *testing.T) {
 	if err := os.WriteFile(f.p.ConfigFile(), []byte("agent: claude\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, err := f.m.startRun(context.Background(), f.repo, "source", f.head, f.head, "push", nil, "", "", false, "")
+	_, err = f.m.startFreshLaunch(context.Background(), f.repo, "source", f.head, "", f.gate, nil, "fresh source validation", "fresh-custody-launch", "fresh-custody-generation", "", false, "push", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -501,5 +527,92 @@ func TestCustodyRefusesUncontainedTerminalStack(t *testing.T) {
 	}
 	if gitOutput(t, f.gate, "rev-parse", "refs/heads/source") != f.head {
 		t.Fatal("gate moved on refusal")
+	}
+}
+
+func TestCustodyPreviouslyPublishedHistoryDoesNotBlockHandoff(t *testing.T) {
+	for _, action := range []string{"release", "reconcile", "rebind"} {
+		t.Run(action, func(t *testing.T) {
+			f := newCustodyFixture(t)
+			gitCmd(t, f.wt, "-c", "user.name=Test", "-c", "user.email=test@test.com", "commit", "--allow-empty", "-m", "published H1")
+			h1 := gitOutput(t, f.wt, "rev-parse", "HEAD")
+			if err := f.d.UpdateRunPublication(f.run.ID, db.PushBinding{HeadSHA: h1, TargetKind: "upstream", Ref: "refs/heads/source"}); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, f.remote, "fetch", f.gate, h1)
+			gitCmd(t, f.remote, "update-ref", "refs/heads/source", h1)
+			gitCmd(t, f.wt, "checkout", "--detach", f.head)
+			gitCmd(t, f.wt, "-c", "user.name=Test", "-c", "user.email=test@test.com", "commit", "--allow-empty", "-m", "author rewritten H2")
+			h2 := gitOutput(t, f.wt, "rev-parse", "HEAD")
+			gitCmd(t, f.wt, "checkout", "--detach", h1)
+			gitCmd(t, f.gate, "update-ref", "refs/heads/source", h2)
+			gitCmd(t, f.remote, "fetch", f.gate, h2)
+			gitCmd(t, f.remote, "update-ref", "refs/heads/source", h2)
+			gitCmd(t, f.remote, "update-ref", "refs/heads/destination", h2)
+			f.host.pr.HeadSHA = h2
+			latest, err := f.d.InsertRun(f.repo.ID, "source", h2, f.head)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.d.UpdateRunPublication(latest.ID, db.PushBinding{HeadSHA: h2, TargetKind: "upstream", Ref: "refs/heads/source"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.d.UpdateRunErrorStatusWithVerifiedHead(latest.ID, "daemon shutting down", types.RunFailed, h2); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.d.UpdateRunPRURL(latest.ID, f.host.pr.URL); err != nil {
+				t.Fatal(err)
+			}
+			f.params.ExpectedRun = latest.ID
+			f.params.Action = action
+			f.params.Destination = "destination"
+			f.params.PRURL = f.host.pr.URL
+			if _, err := f.m.HandleCustody(context.Background(), f.params); err != nil {
+				t.Fatal(err)
+			}
+			old, err := f.d.GetRun(f.run.ID)
+			if err != nil || old.CustodyReturnedAt != nil {
+				t.Fatal("published history was included in outstanding custody")
+			}
+			current, err := f.d.GetRun(latest.ID)
+			if err != nil || current.CustodyReturnedAt == nil {
+				t.Fatal("latest custody not returned")
+			}
+		})
+	}
+}
+
+func TestCustodyUsesOnlyMatchingOriginCredentials(t *testing.T) {
+	for _, action := range []string{"release", "reconcile", "rebind"} {
+		for _, matching := range []bool{true, false} {
+			t.Run(action+fmt.Sprint(matching), func(t *testing.T) {
+				f := newCustodyFixture(t)
+				credentialURL := "https://test-user:test-password@example.com/team/repo.git"
+				registered := safeurl.Redact(credentialURL)
+				origin := credentialURL
+				if !matching {
+					origin = "https://test-user:test-password@example.com/other/repo.git"
+				}
+				gitCmd(t, f.gate, "config", "remote.origin.url", origin)
+				gitCmd(t, f.gate, "config", "url."+f.remote+".insteadOf", credentialURL)
+				missing := filepath.Join(t.TempDir(), "missing.git")
+				gitCmd(t, f.gate, "config", "url."+missing+".insteadOf", registered)
+				var err error
+				f.repo, err = f.d.UpdateRepoMetadata(f.repo.ID, registered, "main")
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.params.Action = action
+				f.params.Destination = "destination"
+				f.params.PRURL = f.host.pr.URL
+				_, err = f.m.HandleCustody(context.Background(), f.params)
+				if matching && err != nil {
+					t.Fatal(err)
+				}
+				if !matching && err == nil {
+					t.Fatal("unmatched origin credentials used")
+				}
+			})
+		}
 	}
 }

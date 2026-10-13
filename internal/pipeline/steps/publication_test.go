@@ -14,6 +14,41 @@ import (
 	"testing"
 )
 
+func TestFreshSourcePublicationDoesNotRestampReboundPR(t *testing.T) {
+	remote := t.TempDir()
+	gitCmd(t, remote, "init", "--bare")
+	dir, base, prior := setupGitRepo(t)
+	gitCmd(t, dir, "remote", "add", "origin", remote)
+	gitCmd(t, dir, "push", "origin", "main", "feature:destination")
+	gitCmd(t, dir, "commit", "--allow-empty", "-m", "fresh source work")
+	head := gitCmd(t, dir, "rev-parse", "HEAD")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+	sctx.Repo.UpstreamURL = remote
+	sctx.Run.Branch = "feature"
+	sctx.ForgeContext = &forgecontext.Context{Provider: scm.ProviderGitHub}
+	setupGateMirror(t, sctx)
+	recordReviewApproval(t, sctx, head)
+	body := filepath.Join(t.TempDir(), "body.md")
+	original := compliantPipelineBody(t, prior)
+	if err := os.WriteFile(body, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Env = append(fakeCIGH(t, "OPEN", `[]`), "FAKE_CLI_PR_LIST_JSON=[]", "FAKE_CLI_PR_BODY_FILE="+body)
+	if _, err := (&PushStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(body)
+	if err != nil || string(after) != original {
+		t.Fatal("fresh source publication restamped rebound PR")
+	}
+	if gitCmd(t, remote, "rev-parse", "refs/heads/destination") != prior {
+		t.Fatal("destination head changed")
+	}
+	if gitCmd(t, remote, "rev-parse", "refs/heads/feature") != head {
+		t.Fatal("fresh source was not published")
+	}
+}
+
 func TestReboundPublicationUpdatesOnlyExistingDestination(t *testing.T) {
 	for _, scenario := range []string{"fast-forward", "missing", "diverged", "replacement"} {
 		t.Run(scenario, func(t *testing.T) {

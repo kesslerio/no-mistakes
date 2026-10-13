@@ -104,6 +104,10 @@ func (m *RunManager) custodyLocked(ctx context.Context, p ipc.CustodyParams) (*i
 	if err != nil {
 		return nil, err
 	}
+	pushURL := repo.PushURL()
+	if origin, err := git.GetConfiguredRemoteURL(ctx, gate, "origin"); err == nil && branchsync.TargetFingerprint(origin) == branchsync.TargetFingerprint(pushURL) {
+		pushURL = origin
+	}
 	expectedPR := p.PRURL
 	if p.Action != "rebind" {
 		if run.PRURL == nil {
@@ -131,7 +135,7 @@ func (m *RunManager) custodyLocked(ctx context.Context, p ipc.CustodyParams) (*i
 		}
 		remoteCtx, cancel := context.WithTimeout(ctx, config.DefaultBranchSyncRemoteTimeout)
 		defer cancel()
-		head, e := git.LsRemote(remoteCtx, gate, repo.PushURL(), "refs/heads/"+destination)
+		head, e := git.LsRemote(remoteCtx, gate, pushURL, "refs/heads/"+destination)
 		if e != nil {
 			return "", "", e
 		}
@@ -157,7 +161,7 @@ func (m *RunManager) custodyLocked(ctx context.Context, p ipc.CustodyParams) (*i
 	}
 	if p.Action == "rebind" {
 		fetchCtx, cancel := context.WithTimeout(ctx, config.DefaultBranchSyncRemoteTimeout)
-		err := git.FetchRemoteRef(fetchCtx, gate, repo.PushURL(), "refs/heads/"+destination, live)
+		err := git.FetchRemoteRef(fetchCtx, gate, pushURL, "refs/heads/"+destination, live)
 		cancel()
 		if err != nil {
 			return nil, fmt.Errorf("import destination head: %w", err)
@@ -313,7 +317,7 @@ func (m *RunManager) custodyLocked(ctx context.Context, p ipc.CustodyParams) (*i
 	}
 	var settled []*db.Run
 	for _, candidate := range stack {
-		if candidate.Branch != p.Branch || candidate.ID == run.ID || candidate.CustodyReturnedAt != nil {
+		if candidate.Branch != p.Branch || candidate.ID == run.ID || !branchsync.UnpublishedPipelineHead(candidate) {
 			continue
 		}
 		if !candidate.Status.Terminal() {
