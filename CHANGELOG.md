@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.86.0](https://github.com/kesslerio/no-mistakes/compare/v1.85.2...v1.86.0) (2026-10-13)
+
+
+### Features
+
+* **daemon:** add explicit custody handoffs and publication rebinding ([#2](https://github.com/kesslerio/no-mistakes/issues/2)) ([99cd207](https://github.com/kesslerio/no-mistakes/commit/99cd2074c3ac3814dc7c76191c540ad4e0436205))
+
+
+### Bug Fixes
+
+* **gate:** credit recovery anchors when reconciling private mirror branches ([#1236](https://github.com/kesslerio/no-mistakes/issues/1236)) ([bff2d06](https://github.com/kesslerio/no-mistakes/commit/bff2d06f8019720dceb8529fef1f04acf3af4d44))
+* **scm:** stop publishing PR bodies pr-body-lint would reject ([#1](https://github.com/kesslerio/no-mistakes/issues/1)) ([6f98c68](https://github.com/kesslerio/no-mistakes/commit/6f98c681f851973db6b2de0818bfc7a260379000))
+
 ## [1.85.2](https://github.com/kunchenguid/no-mistakes/compare/v1.85.1...v1.85.2) (2026-09-29)
 
 
