@@ -1551,3 +1551,12 @@ func (h *Host) GetReviewComments(ctx context.Context, pr *scm.PR) ([]scm.ReviewC
 	}
 	return comments, nil
 }
+
+// ReadPRHead supplies exact live identity evidence for operator custody handoffs.
+func (h *Host) ReadPRHead(ctx context.Context, pr *scm.PR) (string, error) {
+	selector, err := prSelector(pr)
+	if err != nil {
+		return "", err
+	}
+	return h.getPRHeadSHA(ctx, selector)
+}

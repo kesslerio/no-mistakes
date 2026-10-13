@@ -28,7 +28,7 @@ const forkBranchRefPrefix = "refs/remotes/no-mistakes-push/"
 
 func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	ctx := sctx.Ctx
-	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
+	branch := strings.TrimPrefix(sctx.Run.PublicationBranch(), "refs/heads/")
 	defaultBranch := effectivePRBaseBranch(sctx)
 	branchTarget := ""
 	pushRemote := resolveUpstreamURL(sctx)
@@ -494,7 +494,7 @@ Instructions:
 // commit instead of rebasing onto it. The value is resolved config
 // (rebase.strategy), trusted-only for a repository, and defaults to rebasing.
 func mergesMovedBase(sctx *pipeline.StepContext) bool {
-	return sctx.Config != nil && sctx.Config.Rebase.Strategy == config.RebaseStrategyMerge
+	return sctx.Config != nil && ((sctx.Run != nil && sctx.Run.Publication != nil) || sctx.Config.Rebase.Strategy == config.RebaseStrategyMerge)
 }
 
 // integrationVerb names the shape in log lines and findings, so a run reads as

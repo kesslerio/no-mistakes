@@ -1828,7 +1828,7 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 		state.Safety = "blocked_closed"
 		return state, run, true
 	}
-	if ptr(run.PushRef) != "refs/heads/"+branch || ptr(run.PushTargetFingerprint) != TargetFingerprint(s.Repo.PushURL()) || ptr(run.PushTargetKind) != targetKind(s.Repo) {
+	if ptr(run.PushRef) != "refs/heads/"+run.PublicationBranch() || ptr(run.PushTargetFingerprint) != TargetFingerprint(s.Repo.PushURL()) || ptr(run.PushTargetKind) != targetKind(s.Repo) {
 		state.State = StateTargetChanged
 		state.Safety = "blocked_target_changed"
 		state.Error = "the configured push target or branch ref changed after the pipeline push"
@@ -2051,7 +2051,7 @@ func exactPushedBinding(repo *db.Repo, run *db.Run, branch string) bool {
 		run.LastPushedSHA != nil && run.HeadSHA == ptr(run.LastPushedSHA) &&
 		run.PushTargetKind != nil && ptr(run.PushTargetKind) == targetKind(repo) &&
 		run.PushTargetFingerprint != nil && ptr(run.PushTargetFingerprint) == TargetFingerprint(repo.PushURL()) &&
-		run.PushRef != nil && ptr(run.PushRef) == "refs/heads/"+branch &&
+		run.PushRef != nil && ptr(run.PushRef) == "refs/heads/"+run.PublicationBranch() &&
 		run.PushGeneration != nil
 }
 

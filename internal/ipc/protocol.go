@@ -11,6 +11,7 @@ import (
 
 // JSON-RPC 2.0 method names.
 const (
+	MethodCustody                 = "custody"
 	MethodPushReceived            = "push_received"
 	MethodResolvePiProfile        = "resolve_pi_profile"
 	MethodProbeOmitIntent         = "probe_omit_intent"
@@ -575,4 +576,23 @@ func NewErrorResponse(id int64, code int, message string) *Response {
 		Error:   &RPCError{Code: code, Message: message},
 		ID:      id,
 	}
+}
+
+// CustodyParams binds a mutation to the caller's branch and observed run.
+type CustodyParams struct {
+	Head        string `json:"head,omitempty"`
+	RepoID      string `json:"repo_id"`
+	Branch      string `json:"branch"`
+	ExpectedRun string `json:"expected_run"`
+	Action      string `json:"action"`
+	Destination string `json:"destination,omitempty"`
+	PRURL       string `json:"pr_url,omitempty"`
+}
+type CustodyResult struct {
+	NextCommand string `json:"next_command,omitempty"`
+	RunID       string `json:"run_id"`
+	Outcome     string `json:"outcome"`
+	Head        string `json:"head"`
+	PRURL       string `json:"pr_url"`
+	Destination string `json:"destination"`
 }

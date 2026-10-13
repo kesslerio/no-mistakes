@@ -945,6 +945,12 @@ func skipWorktreeCleanup(ctx context.Context, d *db.DB, runID, wtPath string) (b
 // protectedPathCleanupReason protects only the index and working files. It must
 // not be used as a process-liveness or test-evidence retention predicate.
 func protectedPathCleanupReason(d *db.DB, run *db.Run) string {
+	if run != nil {
+		held, err := d.CustodyWorktreeHeld(run.ID)
+		if err != nil || held {
+			return "operator custody handoff preserves this worktree"
+		}
+	}
 	if run == nil || (run.Status == types.RunCancelled && run.Error != nil && *run.Error == types.RunCancelReasonAbortedByUser) {
 		return ""
 	}
@@ -1095,6 +1101,17 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		}
 		return nil
 	}
+
+	srv.Handle(ipc.MethodCustody, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		if err := refuseNested(ctx, false); err != nil {
+			return nil, err
+		}
+		var p ipc.CustodyParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		return mgr.HandleCustody(ctx, p)
+	})
 
 	srv.Handle(ipc.MethodHealth, func(_ context.Context, _ json.RawMessage) (interface{}, error) {
 		return &ipc.HealthResult{Status: "ok"}, nil

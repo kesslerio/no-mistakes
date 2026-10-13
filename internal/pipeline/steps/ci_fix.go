@@ -798,7 +798,7 @@ func attestHeadBeforePush(sctx *pipeline.StepContext, headSHA string, steps []*d
 	if !supportsPRTemplates(provider) {
 		return nil
 	}
-	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
+	branch := strings.TrimPrefix(sctx.Run.PublicationBranch(), "refs/heads/")
 	if branch == effectivePRBaseBranch(sctx) {
 		return nil
 	}

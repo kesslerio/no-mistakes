@@ -30,6 +30,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
 	"github.com/kunchenguid/no-mistakes/internal/runenv"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
@@ -55,7 +56,10 @@ type RunManager struct {
 	paths        *paths.Paths
 	steps        StepFactory
 
-	branchLocks sync.Map // repoID+"/"+branch → *sync.Mutex
+	custodyHost      scm.Host // optional test provider
+	custodyCleanupMu sync.Mutex
+	publicationLocks sync.Map // repo ID to mutex; serializes destination reservations
+	branchLocks      sync.Map // repoID+"/"+branch → *sync.Mutex
 
 	// evalCaptureMu serializes automatic eval collection. Concurrent runs
 	// finishing together would otherwise write the same per-repository object
@@ -137,6 +141,15 @@ func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPl
 }
 
 func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*recoveredRunPlan, error) {
+	if run != nil {
+		held, err := m.db.CustodyWorktreeHeld(run.ID)
+		if err != nil {
+			return nil, err
+		}
+		if held {
+			return nil, fmt.Errorf("operator custody handoff requires reconciliation")
+		}
+	}
 	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince == nil || run.Branch == "" {
 		return nil, fmt.Errorf("run is not a parked running run")
 	}
@@ -634,6 +647,8 @@ func (m *RunManager) cleanupRunEvidence(cfg *config.Config, runID string) {
 // execution returned, or which was resumed after a crash all reach this point by
 // different routes. reason distinguishes the routes in the log.
 func (m *RunManager) removeRunWorktree(repoID, runID, gateDir, wtDir, reason string) {
+	m.custodyCleanupMu.Lock()
+	defer m.custodyCleanupMu.Unlock()
 	m.sweepRunWorktreeProcesses(repoID, runID, wtDir)
 	run, err := m.db.GetRun(runID)
 	if err != nil {
@@ -1311,6 +1326,9 @@ func (m *RunManager) withBranchLock(repoID, branch string, action func() (string
 // startRunWithIntentSourceLocked performs run creation while the caller owns
 // the repository/branch lock. Proof fields are empty for ordinary launches.
 func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, launchNonce, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, inheritedPRURL, planID string, profiles ...*agentcfg.PiProfile) (string, error) {
+	publicationLock := m.publicationLock(repo.ID)
+	publicationLock.Lock()
+	defer publicationLock.Unlock()
 	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
 	trackStartFailure := func(stage string) {
 		telemetry.Track("run", telemetry.Fields{
@@ -1385,6 +1403,34 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		}
 	}
 
+	priorRuns, publicationErr := m.db.GetRunsByRepo(repo.ID)
+	if publicationErr != nil {
+		return "", publicationErr
+	}
+	var inheritedPublication *db.PublicationBinding
+	for _, prior := range priorRuns {
+		if prior.Branch == branch {
+			inheritedPublication = prior.Publication
+			break
+		}
+	}
+	if inheritedPublication != nil {
+		if len(skipSteps) != 0 {
+			return "", fmt.Errorf("rebound publication requires every validation step")
+		}
+		for _, other := range priorRuns {
+			if other.Branch != branch && (other.Status == types.RunRunning || other.Status == types.RunPending) && other.PublicationBranch() == inheritedPublication.Branch {
+				return "", fmt.Errorf("publication destination already owned by run %s", other.ID)
+			}
+		}
+		inheritedPRURL = inheritedPublication.PRURL
+		prBaseBranch = inheritedPublication.BaseBranch
+	}
+	for _, other := range priorRuns {
+		if other.Branch != branch && other.Publication != nil && other.Publication.Branch == branch && (other.Status == types.RunRunning || other.Status == types.RunPending) {
+			return "", fmt.Errorf("branch is a publication destination owned by run %s", other.ID)
+		}
+	}
 	// Cancel any active run for this repo+branch.
 	m.cancelActiveRuns(repo.ID, branch)
 
@@ -1415,6 +1461,13 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	if err != nil {
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
+	}
+	if inheritedPublication != nil {
+		if err := m.db.SetRunPublicationDestination(run.ID, *inheritedPublication); err != nil {
+			_ = m.db.UpdateRunError(run.ID, err.Error())
+			return "", err
+		}
+		run.Publication = inheritedPublication
 	}
 	if inherited := strings.TrimSpace(inheritedPRURL); inherited != "" {
 		if err := m.db.UpdateRunPRURL(run.ID, inherited); err != nil {
@@ -2166,4 +2219,9 @@ func (m *RunManager) cancelActiveRuns(repoID, branch string) {
 			return
 		}
 	}
+}
+
+func (m *RunManager) publicationLock(repoID string) *sync.Mutex {
+	lock, _ := m.publicationLocks.LoadOrStore(repoID, &sync.Mutex{})
+	return lock.(*sync.Mutex)
 }
