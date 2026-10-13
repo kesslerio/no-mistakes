@@ -1997,3 +1997,32 @@ func TestGetPRContentRequiresExplicitStrings(t *testing.T) {
 		t.Fatalf("explicit empty body rejected: %+v, %v", got, err)
 	}
 }
+
+func TestVerifyPRHeadIdentityBindsRepositoryBranchAndCommit(t *testing.T) {
+	for _, test := range []struct {
+		name, repo, branch, sha string
+		allowed                 bool
+	}{
+		{"matching", "https://github.com/test/repo.git", "destination", "abc123", true},
+		{"matching-ssh-target", "https://github.com/test/repo.git", "destination", "abc123", true},
+		{"fork-same-sha", "https://github.com/fork/repo.git", "destination", "abc123", false},
+		{"other-host", "https://enterprise.example/test/repo.git", "destination", "abc123", false},
+		{"other-branch", "https://github.com/test/repo.git", "source", "abc123", false},
+		{"other-sha", "https://github.com/test/repo.git", "destination", "def456", false},
+		{"deleted-repository", "", "destination", "abc123", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			host := New(githubTestCmdFactory(map[string]githubTestResponse{
+				"gh api repos/test/repo/pulls/42 --hostname github.com": {stdout: fmt.Sprintf(`{"head":{"repo":{"clone_url":%q},"ref":%q,"sha":%q}}`, test.repo, test.branch, test.sha)},
+			}), nil, "github.com", "test/repo")
+			target := "https://github.com/test/repo.git"
+			if test.name == "matching-ssh-target" {
+				target = "git@github.com:test/repo.git"
+			}
+			err := scm.VerifyPRHeadIdentity(context.Background(), host, &scm.PR{Number: "42"}, target, "destination", "abc123")
+			if (err == nil) != test.allowed {
+				t.Fatalf("verification error = %v, allowed = %v", err, test.allowed)
+			}
+		})
+	}
+}

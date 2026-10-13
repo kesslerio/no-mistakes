@@ -142,16 +142,8 @@ func (m *RunManager) custodyLocked(ctx context.Context, p ipc.CustodyParams) (*i
 		if head == "" {
 			return "", "", fmt.Errorf("destination branch does not exist")
 		}
-		if reader, ok := host.(interface {
-			ReadPRHead(context.Context, *scm.PR) (string, error)
-		}); ok {
-			pr.HeadSHA, e = reader.ReadPRHead(ctx, pr)
-			if e != nil {
-				return "", "", e
-			}
-		}
-		if pr.HeadSHA == "" || pr.HeadSHA != head {
-			return "", "", fmt.Errorf("PR and destination branch heads are not exactly bound")
+		if e := scm.VerifyPRHeadIdentity(ctx, host, pr, repo.PushURL(), destination, head); e != nil {
+			return "", "", e
 		}
 		return head, pr.BaseBranch, nil
 	}
@@ -316,12 +308,10 @@ func (m *RunManager) custodyLocked(ctx context.Context, p ipc.CustodyParams) (*i
 		return nil, err
 	}
 	var settled []*db.Run
-	for _, candidate := range stack {
-		if candidate.Branch != p.Branch || candidate.ID == run.ID || !branchsync.UnpublishedPipelineHead(candidate) {
+	service := &branchsync.Service{DB: m.db, Repo: repo, GateDir: gate}
+	for _, candidate := range service.OutstandingCustodyRuns(ctx, p.Branch, stack) {
+		if candidate.ID == run.ID {
 			continue
-		}
-		if !candidate.Status.Terminal() {
-			return nil, fmt.Errorf("source branch still owned by run %s", candidate.ID)
 		}
 		candidateDir := worktrees.RecordedDir(m.paths, candidate.WorktreePath(), candidate.RepoID, candidate.ID)
 		if _, err := os.Stat(candidateDir); err == nil {
@@ -408,7 +398,11 @@ func (m *RunManager) validateCustodySuccessor(ctx context.Context, p ipc.Custody
 			intent = *run.Intent
 			source = db.RunIntentSourceRerun
 		}
-		id, err := m.startRunWithIntentSourceLocked(ctx, repo, p.Branch, p.Head, run.BaseSHA, "rerun", nil, intent, source, "", "", "", run.Publication.BaseBranch, run.OmitIntent, run.Publication.PRURL, "", nil)
+		baseOverride := ""
+		if run.PRBaseBranch != nil {
+			baseOverride = *run.PRBaseBranch
+		}
+		id, err := m.startRunWithIntentSourceLocked(ctx, repo, p.Branch, p.Head, run.BaseSHA, "rerun", nil, intent, source, "", "", "", baseOverride, run.OmitIntent, run.Publication.PRURL, "", nil)
 		if err != nil {
 			return "", err
 		}

@@ -42,6 +42,12 @@ func handleFakeCLI(mode string) {
 		}
 	}
 	logFakeCLIStdinBody(args, logFile)
+	if len(args) >= 2 && args[0] == "api" && strings.Contains(args[1], "/pulls/") {
+		if identity := os.Getenv("FAKE_CLI_PR_HEAD_IDENTITY_JSON"); identity != "" {
+			fmt.Println(identity)
+			return
+		}
+	}
 
 	switch mode {
 	case "gh":

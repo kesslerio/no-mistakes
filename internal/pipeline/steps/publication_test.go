@@ -50,7 +50,7 @@ func TestFreshSourcePublicationDoesNotRestampReboundPR(t *testing.T) {
 }
 
 func TestReboundPublicationUpdatesOnlyExistingDestination(t *testing.T) {
-	for _, scenario := range []string{"fast-forward", "missing", "diverged", "replacement"} {
+	for _, scenario := range []string{"fast-forward", "missing", "diverged", "replacement", "wrong-repository", "wrong-branch", "wrong-sha"} {
 		t.Run(scenario, func(t *testing.T) {
 			remote := t.TempDir()
 			gitCmd(t, remote, "init", "--bare")
@@ -87,6 +87,16 @@ func TestReboundPublicationUpdatesOnlyExistingDestination(t *testing.T) {
 				list = fmt.Sprintf(`[{"number":43,"url":%q,"baseRefName":"main"}]`, strings.TrimSuffix(url, "42")+"43")
 			}
 			sctx.Env = append(fakeCIGH(t, "OPEN", `[]`), "FAKE_CLI_PR_LIST_JSON="+list, "FAKE_CLI_PR_BODY_FILE="+body, "FAKE_CLI_PR_TITLE=fix: existing")
+			identityURL, identityBranch, identitySHA := remote, "destination", prior
+			switch scenario {
+			case "wrong-repository":
+				identityURL = remote + "-fork"
+			case "wrong-branch":
+				identityBranch = "other"
+			case "wrong-sha":
+				identitySHA = base
+			}
+			sctx.Env = append(sctx.Env, "FAKE_CLI_PR_HEAD_IDENTITY_JSON="+fmt.Sprintf(`{"head":{"repo":{"clone_url":%q},"ref":%q,"sha":%q}}`, identityURL, identityBranch, identitySHA))
 			_, err := (&PushStep{}).Execute(sctx)
 			if scenario != "fast-forward" {
 				if err == nil {
@@ -115,6 +125,54 @@ func TestReboundPublicationUpdatesOnlyExistingDestination(t *testing.T) {
 			}
 			if gitCmd(t, sctx.GateDir, "rev-parse", "refs/heads/feature") != head {
 				t.Fatal("source mirror not settled")
+			}
+		})
+	}
+}
+
+func TestReboundPRBaseFollowsLiveBaseUnlessExplicit(t *testing.T) {
+	for _, scenario := range []struct{ live, override, expected string }{
+		{"main", "", "main"},
+		{"release", "", "release"},
+		{"main", "release", "release"},
+	} {
+		t.Run(scenario.live+"/"+scenario.override, func(t *testing.T) {
+			remote := t.TempDir()
+			gitCmd(t, remote, "init", "--bare")
+			dir, base, head := setupGitRepo(t)
+			gitCmd(t, dir, "remote", "add", "origin", remote)
+			gitCmd(t, dir, "push", "origin", "main", "feature:destination", "main:release")
+			gitCmd(t, dir, "branch", "release", base)
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+			sctx.Repo.UpstreamURL = remote
+			sctx.ForgeContext = &forgecontext.Context{Provider: scm.ProviderGitHub}
+			url := "https://github.com/" + github.RepoSlug(remote) + "/pull/42"
+			sctx.Run.PRURL = &url
+			sctx.Run.Publication = &db.PublicationBinding{Branch: "destination", PRURL: url, Target: branchsync.TargetFingerprint(remote), BaseBranch: "main", SourceRun: "source"}
+			if scenario.override != "" {
+				sctx.Run.PRBaseBranch = &scenario.override
+			}
+			body := filepath.Join(t.TempDir(), "body.md")
+			log := filepath.Join(t.TempDir(), "gh.log")
+			if err := os.WriteFile(body, []byte(compliantPipelineBody(t, head)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			sctx.Env = append(fakeCIGH(t, "OPEN", `[]`),
+				"FAKE_CLI_PR_LIST_JSON="+fmt.Sprintf(`[{"number":42,"url":%q,"baseRefName":%q}]`, url, scenario.live),
+				"FAKE_CLI_PR_BASE="+scenario.live, "FAKE_CLI_PR_BODY_FILE="+body, "FAKE_CLI_LOG="+log,
+				"FAKE_CLI_PR_HEAD_IDENTITY_JSON="+fmt.Sprintf(`{"head":{"repo":{"clone_url":%q},"ref":"destination","sha":%q}}`, remote, head))
+			if _, err := (&PRStep{}).Execute(sctx); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(log)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if scenario.override == "" && strings.Contains(string(data), "--base ") {
+				t.Fatalf("observed base became retarget: %s", data)
+			}
+			if scenario.override != "" && !strings.Contains(string(data), "--base "+scenario.expected) {
+				t.Fatalf("explicit base not applied: %s", data)
 			}
 		})
 	}

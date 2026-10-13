@@ -949,7 +949,6 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 		if gateHead != headSHA {
 			return "", fmt.Errorf("launch context drift: gate branch %q is at %s, not requested %s", branch, gateHead, headSHA)
 		}
-		inheritedPRURL := ""
 		if baseSHA == "" {
 			runs, err := m.db.GetRunsByRepoHead(repo.ID, branch, headSHA)
 			if err != nil {
@@ -958,12 +957,9 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 			baseSHA = headSHA
 			if len(runs) > 0 {
 				baseSHA = runs[0].BaseSHA
-				if runs[0].Publication == nil {
-					inheritedPRURL = inheritablePRURL(runs[0])
-				}
 			}
 		}
-		runID, err := m.startRunWithIntentSourceLocked(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, persistedIntent, db.RunIntentSourceAgent, launchNonce, validationGeneration, requestDigest, storedPRBaseBranch, omitIntent, inheritedPRURL, planID, request)
+		runID, err := m.startRunWithIntentSourceLocked(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, persistedIntent, db.RunIntentSourceAgent, launchNonce, validationGeneration, requestDigest, storedPRBaseBranch, omitIntent, "", planID, request)
 		if err != nil {
 			return "", err
 		}
@@ -1428,7 +1424,6 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 			}
 		}
 		inheritedPRURL = inheritedPublication.PRURL
-		prBaseBranch = inheritedPublication.BaseBranch
 	}
 	for _, other := range priorRuns {
 		if other.Branch != branch && other.Publication != nil && other.Publication.Branch == branch && (other.Status == types.RunRunning || other.Status == types.RunPending) {

@@ -20,12 +20,16 @@ import (
 
 type custodyTestHost struct {
 	scm.Host
-	pr     scm.PR
-	state  scm.PRState
-	onFind func()
+	pr       scm.PR
+	state    scm.PRState
+	onFind   func()
+	repoURL  string
+	branch   string
+	identity *scm.PRHeadIdentity
 }
 
-func (h *custodyTestHost) FindPR(context.Context, string, string) (*scm.PR, error) {
+func (h *custodyTestHost) FindPR(_ context.Context, branch, _ string) (*scm.PR, error) {
+	h.branch = branch
 	if h.onFind != nil {
 		h.onFind()
 	}
@@ -34,6 +38,13 @@ func (h *custodyTestHost) FindPR(context.Context, string, string) (*scm.PR, erro
 }
 func (h *custodyTestHost) GetPRState(context.Context, *scm.PR) (scm.PRState, error) {
 	return h.state, nil
+}
+
+func (h *custodyTestHost) ReadPRHeadIdentity(context.Context, *scm.PR) (scm.PRHeadIdentity, error) {
+	if h.identity != nil {
+		return *h.identity, nil
+	}
+	return scm.PRHeadIdentity{RepositoryURL: h.repoURL, Branch: h.branch, SHA: h.pr.HeadSHA}, nil
 }
 
 type custodyFixture struct {
@@ -83,7 +94,7 @@ func newCustodyFixture(t *testing.T) *custodyFixture {
 	wt := p.WorktreeDir(repo.ID, run.ID)
 	gitCmd(t, gate, "worktree", "add", "--detach", wt, head)
 	m := NewRunManager(d, p, nil)
-	host := &custodyTestHost{pr: scm.PR{URL: prURL, Number: "17", HeadSHA: head, BaseBranch: "main"}, state: scm.PRStateOpen}
+	host := &custodyTestHost{pr: scm.PR{URL: prURL, Number: "17", HeadSHA: head, BaseBranch: "main"}, state: scm.PRStateOpen, repoURL: remote}
 	m.custodyHost = host
 	return &custodyFixture{m: m, p: p, d: d, repo: repo, run: run, head: head, gate: gate, remote: remote, wt: wt, host: host, params: ipc.CustodyParams{RepoID: repo.ID, Branch: "source", ExpectedRun: run.ID, Action: "release"}}
 }
@@ -299,11 +310,25 @@ func TestCustodyReboundSuccessorStartsWithNoApproval(t *testing.T) {
 	defer f.m.Shutdown()
 	select {
 	case run := <-observed:
-		if run.ID == f.run.ID || run.ID != validation.RunID || run.HeadSHA != archived || run.Publication == nil || run.Publication.Branch != "destination" || run.ReviewApprovedHeadSHA != nil || run.LastPushedSHA != nil {
+		if run.ID == f.run.ID || run.ID != validation.RunID || run.HeadSHA != archived || run.Publication == nil || run.Publication.Branch != "destination" || run.ReviewApprovedHeadSHA != nil || run.LastPushedSHA != nil || run.PRBaseBranch != nil {
 			t.Fatalf("successor inherited approval or lost binding: %#v", run)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("successor did not reach fresh review")
+	}
+	f.m.wg.Wait()
+	gitCmd(t, f.gate, "config", "remote.origin.url", f.remote)
+	gitCmd(t, f.remote, "update-ref", "refs/heads/release", f.head)
+	if _, err := f.m.HandleRerun(context.Background(), f.repo.ID, "source", "", nil, "", "release", false, archived, ""); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case run := <-observed:
+		if run.PRBaseBranch == nil || *run.PRBaseBranch != "release" {
+			t.Fatalf("explicit rerun base lost: %#v", run.PRBaseBranch)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("explicit-base rerun did not reach review")
 	}
 	f.m.wg.Wait()
 }
@@ -599,6 +624,7 @@ func TestCustodyUsesOnlyMatchingOriginCredentials(t *testing.T) {
 				gitCmd(t, f.gate, "config", "url."+missing+".insteadOf", registered)
 				var err error
 				f.repo, err = f.d.UpdateRepoMetadata(f.repo.ID, registered, "main")
+				f.host.repoURL = registered
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -611,6 +637,43 @@ func TestCustodyUsesOnlyMatchingOriginCredentials(t *testing.T) {
 				}
 				if !matching && err == nil {
 					t.Fatal("unmatched origin credentials used")
+				}
+			})
+		}
+	}
+}
+
+func TestCustodyRefusesWrongPRHeadIdentity(t *testing.T) {
+	for _, action := range []string{"release", "reconcile", "rebind"} {
+		for _, mismatch := range []string{"repository", "branch", "commit"} {
+			t.Run(action+"/"+mismatch, func(t *testing.T) {
+				f := newCustodyFixture(t)
+				branch := "source"
+				if action == "rebind" {
+					branch = "destination"
+				}
+				identity := scm.PRHeadIdentity{RepositoryURL: f.remote, Branch: branch, SHA: f.head}
+				switch mismatch {
+				case "repository":
+					identity.RepositoryURL = f.remote + "-fork"
+				case "branch":
+					identity.Branch = "other"
+				case "commit":
+					identity.SHA = "other"
+				}
+				f.host.identity = &identity
+				f.params.Action = action
+				f.params.Destination = "destination"
+				f.params.PRURL = f.host.pr.URL
+				if _, err := f.m.HandleCustody(context.Background(), f.params); err == nil {
+					t.Fatal("wrong PR identity accepted")
+				}
+				run, err := f.d.GetRun(f.run.ID)
+				if err != nil || run.CustodyReturnedAt != nil {
+					t.Fatal("identity refusal returned custody")
+				}
+				if gitOutput(t, f.gate, "rev-parse", "refs/heads/source") != f.head {
+					t.Fatal("identity refusal moved gate")
 				}
 			})
 		}

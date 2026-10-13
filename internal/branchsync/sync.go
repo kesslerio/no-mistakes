@@ -533,7 +533,7 @@ func (s *Service) BindRecoveryArchive(ctx context.Context, archiveRef string) St
 		return refusal
 	}
 	state, run, _ := s.inspect(ctx)
-	if run == nil || state.State != StatePipelineOwned || !terminalRunStatus(run.Status) || !UnpublishedPipelineHead(run) || run.CustodyReturnedAt != nil {
+	if run == nil || state.State != StatePipelineOwned || !terminalRunStatus(run.Status) || !unpublishedPipelineHead(run) || run.CustodyReturnedAt != nil {
 		return blockedPlan(state, state.State, "blocked_recover_archive_not_applicable", "an archive can be bound only to the selected terminal run that still owns an unpublished pipeline head; no files or refs were changed")
 	}
 	if run.TerminalHeadVerifiedAt == nil {
@@ -1332,7 +1332,7 @@ func (s *Service) recoverAdoptPreserved(ctx context.Context, run *db.Run, state 
 // to the verified live head. It never touches the worktree, a branch ref, the
 // gate branch, or the remote, and stamps no custody.
 func (s *Service) recoverRemoteRewritten(ctx context.Context, run *db.Run, keepLocal bool) (State, bool) {
-	if run == nil || !terminalRunStatus(run.Status) || run.LastPushedSHA == nil || UnpublishedPipelineHead(run) {
+	if run == nil || !terminalRunStatus(run.Status) || run.LastPushedSHA == nil || unpublishedPipelineHead(run) {
 		return State{}, false
 	}
 	fresh := s.Refresh(ctx)
@@ -1509,7 +1509,7 @@ func (s *Service) preserveKeepLocalCandidates(ctx context.Context, runIDs, candi
 	}
 	for i, runID := range runIDs {
 		candidate, err := s.DB.GetRun(runID)
-		if err != nil || candidate == nil || candidate.HeadSHA != candidateHeads[i] || candidate.TerminalHeadVerifiedAt == nil || !terminalRunStatus(candidate.Status) || !UnpublishedPipelineHead(candidate) {
+		if err != nil || candidate == nil || candidate.HeadSHA != candidateHeads[i] || candidate.TerminalHeadVerifiedAt == nil || !terminalRunStatus(candidate.Status) || !unpublishedPipelineHead(candidate) {
 			return fmt.Errorf("run %s changed after preflight", runID)
 		}
 		if compatible, err := recoveryAnchorCompatible(ctx, s.workDir(), runID, candidate.HeadSHA); err != nil || !compatible {
@@ -1721,11 +1721,11 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 		if candidate.Branch != branch {
 			continue
 		}
-		if candidate.Status == types.RunPending || candidate.Status == types.RunRunning || UnpublishedPipelineHead(candidate) {
+		if candidate.Status == types.RunPending || candidate.Status == types.RunRunning || unpublishedPipelineHead(candidate) {
 			// A terminal unpublished run can be superseded only by a newer
 			// exact binding whose pushed head is proven, in the local gate, to
 			// contain the preserved head. Active ownership remains absolute.
-			if UnpublishedPipelineHead(candidate) && s.supersededUnpublishedRun(ctx, candidate, newerPushed, branch) {
+			if unpublishedPipelineHead(candidate) && s.supersededUnpublishedRun(ctx, candidate, newerPushed, branch) {
 				continue
 			}
 			run = candidate
@@ -2036,7 +2036,7 @@ func duplicateBranchCheckout(ctx context.Context, dir, branch string) bool {
 	return count != 1
 }
 
-func UnpublishedPipelineHead(run *db.Run) bool {
+func unpublishedPipelineHead(run *db.Run) bool {
 	if run == nil || run.SubmittedHeadSHA == nil || run.CustodyReturnedAt != nil {
 		return false
 	}
@@ -2061,7 +2061,7 @@ func exactPushedBinding(repo *db.Repo, run *db.Run, branch string) bool {
 // binding, and Git must prove the older preserved head is its ancestor. Any
 // missing or conflicting evidence leaves the older run authoritative.
 func (s *Service) supersededUnpublishedRun(ctx context.Context, older, newer *db.Run, branch string) bool {
-	if older == nil || newer == nil || !terminalRunStatus(older.Status) || !UnpublishedPipelineHead(older) ||
+	if older == nil || newer == nil || !terminalRunStatus(older.Status) || !unpublishedPipelineHead(older) ||
 		!samePushTargetBinding(older, newer) || strings.TrimSpace(s.GateDir) == "" || older.HeadSHA == "" || newer.LastPushedSHA == nil {
 		return false
 	}
@@ -2169,6 +2169,26 @@ func (proof recoverySourceProof) apply(state State) State {
 	return state
 }
 
+func (s *Service) OutstandingCustodyRuns(ctx context.Context, branch string, runs []*db.Run) []*db.Run {
+	var outstanding []*db.Run
+	var newerPushed *db.Run
+	for _, candidate := range runs {
+		if candidate.Branch != branch {
+			continue
+		}
+		if unpublishedPipelineHead(candidate) && s.supersededUnpublishedRun(ctx, candidate, newerPushed, branch) {
+			continue
+		}
+		if newerPushed == nil && exactPushedBinding(s.Repo, candidate, branch) {
+			newerPushed = candidate
+		}
+		if terminalRunStatus(candidate.Status) && unpublishedPipelineHead(candidate) {
+			outstanding = append(outstanding, candidate)
+		}
+	}
+	return outstanding
+}
+
 func (s *Service) missingHeadKeepLocalRuns(ctx context.Context, state *State, run *db.Run) ([]string, []string, bool, bool) {
 	if state == nil || run == nil {
 		return nil, nil, false, false
@@ -2192,20 +2212,7 @@ func (s *Service) missingHeadKeepLocalRuns(ctx context.Context, state *State, ru
 	var candidateHeads []string
 	anyMissing := false
 	allEligible := true
-	var newerPushed *db.Run
-	for _, candidate := range runs {
-		if candidate.Branch != state.Local.Branch {
-			continue
-		}
-		if UnpublishedPipelineHead(candidate) && s.supersededUnpublishedRun(ctx, candidate, newerPushed, state.Local.Branch) {
-			continue
-		}
-		if newerPushed == nil && exactPushedBinding(s.Repo, candidate, state.Local.Branch) {
-			newerPushed = candidate
-		}
-		if !terminalRunStatus(candidate.Status) || !UnpublishedPipelineHead(candidate) {
-			continue
-		}
+	for _, candidate := range s.OutstandingCustodyRuns(ctx, state.Local.Branch, runs) {
 		eligible := candidate.TerminalHeadVerifiedAt != nil && strings.TrimSpace(candidate.HeadSHA) != ""
 		missing := eligible && !objectExists(ctx, s.workDir(), candidate.HeadSHA) && !objectExists(ctx, gateDir, candidate.HeadSHA)
 		if eligible {

@@ -1,8 +1,11 @@
 package steps
 
 import (
+	"context"
 	"fmt"
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
+	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
@@ -41,5 +44,11 @@ func verifyPublicationDestination(sctx *pipeline.StepContext) error {
 	if state != scm.PRStateOpen {
 		return fmt.Errorf("rebound destination PR is not open")
 	}
-	return nil
+	ctx, cancel := context.WithTimeout(sctx.Ctx, config.DefaultBranchSyncRemoteTimeout)
+	defer cancel()
+	head, err := git.LsRemote(ctx, sctx.WorkDir, resolvePushURL(sctx), "refs/heads/"+p.Branch)
+	if err != nil {
+		return err
+	}
+	return scm.VerifyPRHeadIdentity(ctx, host, pr, sctx.Repo.PushURL(), p.Branch, head)
 }
