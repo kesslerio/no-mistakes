@@ -406,3 +406,100 @@ func TestCustodyValidateRefusesUnboundOrMovedHead(t *testing.T) {
 		})
 	}
 }
+
+func TestCustodySettlesTerminalStack(t *testing.T) {
+	for _, action := range []string{"release", "reconcile", "rebind"} {
+		t.Run(action, func(t *testing.T) {
+			f := newCustodyFixture(t)
+			prior, err := f.d.InsertRun(f.repo.ID, "source", f.head, f.head)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.d.UpdateRunErrorStatusWithVerifiedHead(prior.ID, "daemon shutting down", types.RunFailed, f.head); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.d.UpdateRunPRURL(prior.ID, f.host.pr.URL); err != nil {
+				t.Fatal(err)
+			}
+			f.params.ExpectedRun = prior.ID
+			f.params.Action = action
+			f.params.Destination = "destination"
+			f.params.PRURL = f.host.pr.URL
+			if _, err := f.m.HandleCustody(context.Background(), f.params); err != nil {
+				t.Fatal(err)
+			}
+			for _, id := range []string{prior.ID, f.run.ID} {
+				run, err := f.d.GetRun(id)
+				if err != nil || run.CustodyReturnedAt == nil {
+					t.Fatalf("custody remains: %s %v", id, err)
+				}
+			}
+		})
+	}
+}
+
+func TestCustodyFreshLaunchDoesNotInheritDestination(t *testing.T) {
+	f := newCustodyFixture(t)
+	f.params.Action = "rebind"
+	f.params.Destination = "destination"
+	f.params.PRURL = f.host.pr.URL
+	if _, err := f.m.HandleCustody(context.Background(), f.params); err != nil {
+		t.Fatal(err)
+	}
+	f.host.state = scm.PRStateClosed
+	observed := make(chan *db.Run, 1)
+	f.m.steps = func() []pipeline.Step { return []pipeline.Step{&custodySuccessorStep{observed: observed}} }
+	bin := t.TempDir()
+	writeMockClaude(t, bin)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := os.WriteFile(f.p.ConfigFile(), []byte("agent: claude\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := f.m.startRun(context.Background(), f.repo, "source", f.head, f.head, "push", nil, "", "", false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.m.Shutdown()
+	select {
+	case run := <-observed:
+		if run.Publication != nil || run.PRURL != nil {
+			t.Fatalf("fresh launch inherited destination: %#v", run)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("fresh launch did not reach review")
+	}
+	f.m.wg.Wait()
+}
+
+func TestCustodyRefusesUncontainedTerminalStack(t *testing.T) {
+	f := newCustodyFixture(t)
+	gitCmd(t, f.wt, "-c", "user.name=Test", "-c", "user.email=test@test.com", "commit", "--allow-empty", "-m", "orphaned older work")
+	unpublished := gitOutput(t, f.wt, "rev-parse", "HEAD")
+	gitCmd(t, f.wt, "checkout", "--detach", f.head)
+	if err := f.d.UpdateRunErrorStatusWithVerifiedHead(f.run.ID, "failure", types.RunFailed, unpublished); err != nil {
+		t.Fatal(err)
+	}
+	latest, err := f.d.InsertRun(f.repo.ID, "source", f.head, f.head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.UpdateRunErrorStatusWithVerifiedHead(latest.ID, "daemon shutting down", types.RunFailed, f.head); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.UpdateRunPRURL(latest.ID, f.host.pr.URL); err != nil {
+		t.Fatal(err)
+	}
+	f.params.ExpectedRun = latest.ID
+	if _, err := f.m.HandleCustody(context.Background(), f.params); err == nil {
+		t.Fatal("orphaned older work accepted")
+	}
+	for _, id := range []string{latest.ID, f.run.ID} {
+		run, err := f.d.GetRun(id)
+		if err != nil || run.CustodyReturnedAt != nil {
+			t.Fatalf("custody incorrectly returned: %s %v", id, err)
+		}
+	}
+	if gitOutput(t, f.gate, "rev-parse", "refs/heads/source") != f.head {
+		t.Fatal("gate moved on refusal")
+	}
+}

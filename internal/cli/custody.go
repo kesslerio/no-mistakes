@@ -6,6 +6,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/spf13/cobra"
+	"time"
 )
 
 func newCustodyCmd() *cobra.Command {
@@ -40,7 +41,7 @@ func newCustodyCmd() *cobra.Command {
 				return fmt.Errorf("no run for current branch")
 			}
 			var result ipc.CustodyResult
-			if err := env.client.Call(ipc.MethodCustody, &ipc.CustodyParams{RepoID: env.repo.ID, Branch: branch, ExpectedRun: id, Action: action, Destination: destination, PRURL: prURL, Head: head}, &result); err != nil {
+			if err := env.client.CallWithContext(cmd.Context(), ipc.MethodCustody, &ipc.CustodyParams{RepoID: env.repo.ID, Branch: branch, ExpectedRun: id, Action: action, Destination: destination, PRURL: prURL, Head: head}, &result, 3*time.Minute); err != nil {
 				return err
 			}
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(result)

@@ -1410,7 +1410,9 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	var inheritedPublication *db.PublicationBinding
 	for _, prior := range priorRuns {
 		if prior.Branch == branch {
-			inheritedPublication = prior.Publication
+			if trigger == "rerun" {
+				inheritedPublication = prior.Publication
+			}
 			break
 		}
 	}

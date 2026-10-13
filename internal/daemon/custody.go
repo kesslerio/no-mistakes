@@ -24,11 +24,11 @@ import (
 // executor must be gone before its destination can change. Holds survive a
 // daemon crash and keep cancellation cleanup from deleting raced work.
 func (m *RunManager) HandleCustody(ctx context.Context, p ipc.CustodyParams) (*ipc.CustodyResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
 	if p.Action == "validate" {
 		return m.validateCustodySuccessor(ctx, p)
 	}
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
-	defer cancel()
 	var result *ipc.CustodyResult
 	_, err := m.withBranchLock(p.RepoID, p.Branch, func() (string, error) {
 		lock := m.publicationLock(p.RepoID)
@@ -307,6 +307,39 @@ func (m *RunManager) custodyLocked(ctx context.Context, p ipc.CustodyParams) (*i
 	if old != gateBefore {
 		return nil, fmt.Errorf("source gate changed during quiescence; both heads are preserved")
 	}
+	stack, err := m.db.GetRunsByRepo(repo.ID)
+	if err != nil {
+		return nil, err
+	}
+	var settled []*db.Run
+	for _, candidate := range stack {
+		if candidate.Branch != p.Branch || candidate.ID == run.ID || candidate.CustodyReturnedAt != nil {
+			continue
+		}
+		if !candidate.Status.Terminal() {
+			return nil, fmt.Errorf("source branch still owned by run %s", candidate.ID)
+		}
+		candidateDir := worktrees.RecordedDir(m.paths, candidate.WorktreePath(), candidate.RepoID, candidate.ID)
+		if _, err := os.Stat(candidateDir); err == nil {
+			dirty, err := git.Run(ctx, candidateDir, "status", "--porcelain", "--untracked-files=all")
+			if err != nil || dirty != "" {
+				return nil, fmt.Errorf("run %s has unpreserved worktree changes", candidate.ID)
+			}
+			actual, err := git.HeadSHA(ctx, candidateDir)
+			if err != nil || actual != candidate.HeadSHA {
+				return nil, fmt.Errorf("run %s worktree head differs from its custody record", candidate.ID)
+			}
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		}
+		if _, err := git.Run(ctx, gate, "merge-base", "--is-ancestor", candidate.HeadSHA, head); err != nil {
+			return nil, fmt.Errorf("run %s has unpublished work outside the handoff head", candidate.ID)
+		}
+		if err := custody.PreserveRecoveryHead(ctx, gate, candidate.ID, candidate.HeadSHA); err != nil {
+			return nil, err
+		}
+		settled = append(settled, candidate)
+	}
 	if _, err := git.Run(ctx, gate, "update-ref", "--no-deref", ref, head, old); err != nil {
 		return nil, err
 	}
@@ -314,7 +347,7 @@ func (m *RunManager) custodyLocked(ctx context.Context, p ipc.CustodyParams) (*i
 	if p.Action == "rebind" {
 		binding = &db.PublicationBinding{Branch: destination, PRURL: expectedPR, Target: branchsync.TargetFingerprint(repo.PushURL()), BaseBranch: base, SourceRun: run.ID}
 	}
-	if err := m.db.FinishCustody(run, binding); err != nil {
+	if err := m.db.FinishCustody(run, binding, settled...); err != nil {
 		_, rollback := git.Run(context.WithoutCancel(ctx), gate, "update-ref", "--no-deref", ref, old, head)
 		return nil, fmt.Errorf("record custody: %w (gate rollback: %v)", err, rollback)
 	}

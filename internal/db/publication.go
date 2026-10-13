@@ -84,7 +84,7 @@ func (d *DB) CustodyWorktreeHeld(id string) (bool, error) {
 
 // FinishCustody commits only against the quiesced run snapshot; the prior
 // publication and approval columns remain an audit record of the old target.
-func (d *DB) FinishCustody(run *Run, binding *PublicationBinding) error {
+func (d *DB) FinishCustody(run *Run, binding *PublicationBinding, settled ...*Run) error {
 	var value any
 	if binding != nil {
 		value = *binding
@@ -95,7 +95,22 @@ func (d *DB) FinishCustody(run *Run, binding *PublicationBinding) error {
 	if run.Publication != nil {
 		previous = *run.Publication
 	}
-	result, err := d.sql.Exec(`UPDATE runs SET custody_returned_at = ?, publication_binding = ?, updated_at = ? WHERE id = ? AND head_sha = ? AND status = ? AND updated_at = ? AND status NOT IN ('running','pending') AND last_pushed_sha IS ? AND push_generation IS ? AND pr_url IS ? AND publication_binding IS ? AND custody_returned_at IS ?`, now(), value, now(), run.ID, run.HeadSHA, run.Status, run.UpdatedAt, run.LastPushedSHA, run.PushGeneration, run.PRURL, previous, run.CustodyReturnedAt)
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, candidate := range settled {
+		result, err := tx.Exec(`UPDATE runs SET custody_returned_at = ?, updated_at = ? WHERE id = ? AND repo_id = ? AND branch = ? AND head_sha = ? AND status = ? AND updated_at = ? AND custody_returned_at IS NULL AND status NOT IN ('running','pending')`, now(), now(), candidate.ID, run.RepoID, run.Branch, candidate.HeadSHA, candidate.Status, candidate.UpdatedAt)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil || n != 1 {
+			return fmt.Errorf("custody stack changed during handoff")
+		}
+	}
+	result, err := tx.Exec(`UPDATE runs SET custody_returned_at = ?, publication_binding = ?, updated_at = ? WHERE id = ? AND head_sha = ? AND status = ? AND updated_at = ? AND status NOT IN ('running','pending') AND last_pushed_sha IS ? AND push_generation IS ? AND pr_url IS ? AND publication_binding IS ? AND custody_returned_at IS ?`, now(), value, now(), run.ID, run.HeadSHA, run.Status, run.UpdatedAt, run.LastPushedSHA, run.PushGeneration, run.PRURL, previous, run.CustodyReturnedAt)
 	if err != nil {
 		return err
 	}
@@ -106,5 +121,5 @@ func (d *DB) FinishCustody(run *Run, binding *PublicationBinding) error {
 	if n != 1 {
 		return fmt.Errorf("run changed during custody handoff")
 	}
-	return nil
+	return tx.Commit()
 }

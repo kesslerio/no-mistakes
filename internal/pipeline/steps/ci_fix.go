@@ -204,6 +204,13 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 		promptRules = ciFailingCheckFixRules
 	}
 
+	if mergeConflict && sctx.Run.Publication != nil {
+		promptIntro = strings.ReplaceAll(promptIntro, "rebase onto", "merge")
+		promptIntro = strings.ReplaceAll(promptIntro, "Rebase onto", "Merge")
+		promptRules = strings.ReplaceAll(promptRules, "rebase", "merge")
+		promptRules += "\n- Preserve the current branch history; resolve conflicts additively without rebasing or rewriting commits."
+	}
+
 	prompt := fmt.Sprintf(
 		`%s
 
@@ -226,8 +233,9 @@ Context:
 		mergeConflict,
 		promptRules,
 	)
+
 	if mergeConflict {
-		prompt += fmt.Sprintf("\n- rebase target commit: %s", rebaseBaseSHA)
+		prompt += fmt.Sprintf("\n- integration target commit: %s", rebaseBaseSHA)
 	}
 	if logOutput != "" {
 		prompt += fmt.Sprintf(`
