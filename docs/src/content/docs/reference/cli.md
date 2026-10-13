@@ -752,18 +752,30 @@ recursive use from pipeline agents. They do not accept a run selector.
   startup recovery behavior.
 
 These commands currently require a provider that can supply exact live PR-head
-proof (GitHub supports this). Unsupported or unavailable proof fails closed.
+proof of the head repository, branch, and SHA (GitHub supports this).
+Unsupported or unavailable proof fails closed.
 They never create a remote branch, rewrite published history, or approve a run.
 A successor uses the existing destination PR, merges base updates rather than
-rebasing published history, and refuses a missing or replaced PR. Its push must
+rebasing published history, and refuses a missing or replaced PR. Publication
+binding and PR identity travel together from the explicitly selected predecessor
+to its successor and reruns, including a run selected in the TUI; unrelated fresh
+launches inherit neither. Its push must
 be a fast-forward or an exact no-op. A fast-forward uses an explicit expected-ref
 lease after proving ancestry so a concurrent deletion cannot recreate the branch.
+The [pre-push attestation contract](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation) applies to the bound existing PR regardless of the configured base.
+
+Handoffs refuse the default branch as either source or destination. They also
+check the outstanding terminal custody stack using the same eligibility rules
+as guarded recovery: each outstanding head must be contained in the handoff
+head and archived before custody is returned. Already superseded published
+history does not block a handoff.
 
 Dirty managed worktrees, missing commits, occupied destinations, changed PR or
 remote evidence, and conflicting preservation refs refuse. Work arriving during
 quiescence remains in the retained managed worktree; inspect it before retrying.
-Handoff worktrees are durably excluded from automatic cleanup, including after a
-restart. Verified heads are preserved under
+Worktree retention and restart handling are owned by
+[Daemon & Worktrees](/no-mistakes/concepts/daemon/#what-it-does).
+Verified heads are preserved under
 `refs/no-mistakes/custody/<run>/<head>` in the gate. An interrupted handoff can
 therefore leave archives and a stopped run while refusing to return custody;
 those artifacts are preservation evidence, not publication or approval evidence.

@@ -215,7 +215,7 @@ When unset, no-mistakes preserves the existing behavior and targets `Repo.Defaul
 
 PR lookup matches an existing PR by branch alone, never filtered by base, so a `pr.base_branch` change after a PR was opened updates that PR instead of opening a duplicate against the new base.
 A per-run `--base-branch` override is different: if the run's already-open PR targets another branch, the PR step retargets that PR (GitHub, GitLab, and Gitea) so title, body, and CI follow the requested integration branch. A discovered PR that is not the run's persisted identity, or a provider that cannot retarget, fails closed rather than moving another review object. See [PR](/no-mistakes/reference/pipeline-steps/#pr).
-Once a PR exists, its actual forge base branch is authoritative over `pr.base_branch` for the CI step's merge-conflict auto-fix and base-branch tip monitoring, protecting a resumed run from a configuration change made after the PR was created.
+Once a PR exists, its actual forge base branch is authoritative over `pr.base_branch` for the CI step's merge-conflict auto-fix and base-branch tip monitoring, protecting a resumed run from a configuration change made after the PR was created. For a [custody-rebound successor](/no-mistakes/reference/cli/#explicit-custody-handoffs), integration and PR comparison/drafting also resolve the destination PR's current live base. An explicit operator `--base-branch` override wins and survives reruns; rebinding publication alone never requests a base retarget or captures a base override.
 
 Because this setting controls where a PR lands, a pushed branch cannot redirect its own PR target by changing `pr.base_branch`.
 It is read from the trusted default-branch copy regardless of `allow_repo_commands` by default.
@@ -754,7 +754,7 @@ rebase:
   strategy: merge
 ```
 
-**Opting in.** Commit that block to your **default branch** (the same copy the daemon reads `commands` and `agent` from). It takes effect on the next run of every branch in the repository; a branch cannot opt itself in or out. The default stays `rebase` for every repository that does not ask, so upgrading no-mistakes never changes the shape of history under you.
+**Opting in.** Commit that block to your **default branch** (the same copy the daemon reads `commands` and `agent` from). It takes effect on the next run of every branch in the repository; a branch cannot opt itself in or out. Ordinary runs retain the `rebase` default. A [custody-rebound successor](/no-mistakes/reference/cli/#explicit-custody-handoffs) always uses merge integration to preserve published history, regardless of this setting.
 
 - **`rebase` (default)** replays the branch's commits on top of the new base. This is the historical behavior and is unchanged.
 - **`merge`** integrates the base with a `git merge --no-ff` commit whose **first parent** is the head the pipeline reviewed.
@@ -768,7 +768,7 @@ The two differ in what survives the integration, which matters in three places:
 | Evidence of what a conflict resolution did | none; the result is just commits | the merge commit's two parents and their merge base |
 | Cost | none | one merge commit per integration |
 
-Integration publishes as a fast-forward under `merge`. A CI merge-conflict repair is the exception: it rebases onto the base branch whichever strategy is set, so that repair still force-pushes and still revalidates in full.
+Integration publishes as a fast-forward under `merge`. CI conflict-repair integration and revalidation are governed separately by the [CI step](/no-mistakes/reference/pipeline-steps/#ci).
 
 **Continuity.** The CI step publishes a repair without a full revalidation cycle only when it can prove the repaired head continues the reviewed head (see [`ci.revalidate_repairs`](#cirevalidate_repairs)). Under `merge` that proof is plain ancestry, because the reviewed head is a parent. Under `rebase` there is nothing to prove it with.
 
