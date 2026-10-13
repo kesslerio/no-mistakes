@@ -679,3 +679,70 @@ func TestCustodyRefusesWrongPRHeadIdentity(t *testing.T) {
 		}
 	}
 }
+
+func TestCustodySelectedRerunKeepsPublicationAndPRTogether(t *testing.T) {
+	for _, selectedBound := range []bool{true, false} {
+		t.Run(fmt.Sprint(selectedBound), func(t *testing.T) {
+			f := newCustodyFixture(t)
+			binding := db.PublicationBinding{Branch: "destination", PRURL: f.host.pr.URL, Target: "target", SourceRun: f.run.ID}
+			selected, err := f.d.InsertRun(f.repo.ID, "source", f.head, f.head)
+			if err != nil {
+				t.Fatal(err)
+			}
+			latest, err := f.d.InsertRun(f.repo.ID, "source", f.head, f.head)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bound := latest
+			if selectedBound {
+				bound = selected
+			}
+			if err := f.d.SetRunPublicationDestination(bound.ID, binding); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.d.UpdateRunPRURL(bound.ID, binding.PRURL); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.d.UpdateRunPublication(bound.ID, db.PushBinding{HeadSHA: f.head, Ref: "refs/heads/destination", TargetKind: "upstream"}); err != nil {
+				t.Fatal(err)
+			}
+			for _, prior := range []*db.Run{selected, latest} {
+				if err := f.d.UpdateRunStatus(prior.ID, types.RunFailed); err != nil {
+					t.Fatal(err)
+				}
+			}
+			observed := make(chan *db.Run, 1)
+			f.m.steps = func() []pipeline.Step { return []pipeline.Step{&custodySuccessorStep{observed: observed}} }
+			bin := t.TempDir()
+			writeMockClaude(t, bin)
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			if err := os.WriteFile(f.p.ConfigFile(), []byte("agent: claude\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			id, err := f.m.HandleRerun(context.Background(), f.repo.ID, "source", selected.ID, nil, "", "", false, f.head, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.m.Shutdown()
+			select {
+			case run := <-observed:
+				persisted, err := f.d.GetRun(id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, actual := range []*db.Run{run, persisted} {
+					if selectedBound {
+						if actual.Publication == nil || *actual.Publication != binding || actual.PRURL == nil || *actual.PRURL != binding.PRURL || actual.PublicationBranch() != "destination" {
+							t.Fatalf("selected binding lost: %#v", actual)
+						}
+					} else if actual.Publication != nil || actual.PRURL != nil || actual.PublicationBranch() != "source" {
+						t.Fatalf("latest binding leaked: %#v", actual)
+					}
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("selected rerun did not reach review")
+			}
+			f.m.wg.Wait()
+		})
+	}
+}

@@ -52,7 +52,7 @@ func TestFreshSourcePublicationDoesNotRestampReboundPR(t *testing.T) {
 }
 
 func TestReboundPublicationUpdatesOnlyExistingDestination(t *testing.T) {
-	for _, scenario := range []string{"fast-forward", "missing", "diverged", "replacement", "wrong-repository", "wrong-branch", "wrong-sha"} {
+	for _, scenario := range []string{"fast-forward", "attestation-failure", "missing", "diverged", "replacement", "wrong-repository", "wrong-branch", "wrong-sha"} {
 		t.Run(scenario, func(t *testing.T) {
 			remote := t.TempDir()
 			gitCmd(t, remote, "init", "--bare")
@@ -74,6 +74,7 @@ func TestReboundPublicationUpdatesOnlyExistingDestination(t *testing.T) {
 			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
 			sctx.Repo.UpstreamURL = remote
 			sctx.Run.Branch = "feature"
+			sctx.Config.PR.BaseBranch = "destination"
 			url := "https://github.com/" + github.RepoSlug(remote) + "/pull/42"
 			sctx.Run.PRURL = &url
 			sctx.ForgeContext = &forgecontext.Context{Provider: scm.ProviderGitHub}
@@ -84,11 +85,18 @@ func TestReboundPublicationUpdatesOnlyExistingDestination(t *testing.T) {
 			if err := os.WriteFile(body, []byte(compliantPipelineBody(t, prior)), 0o644); err != nil {
 				t.Fatal(err)
 			}
+			hook := "#!/bin/sh\nbody=$(cat '" + body + "')\ncase \"$body\" in *'" + head + "'*) exit 0;; *) exit 1;; esac\n"
+			if err := os.WriteFile(filepath.Join(remote, "hooks", "pre-receive"), []byte(hook), 0o755); err != nil {
+				t.Fatal(err)
+			}
 			list := fmt.Sprintf(`[{"number":42,"url":%q,"baseRefName":"main"}]`, url)
 			if scenario == "replacement" {
 				list = fmt.Sprintf(`[{"number":43,"url":%q,"baseRefName":"main"}]`, strings.TrimSuffix(url, "42")+"43")
 			}
 			sctx.Env = append(fakeCIGH(t, "OPEN", `[]`), "FAKE_CLI_PR_LIST_JSON="+list, "FAKE_CLI_PR_BODY_FILE="+body, "FAKE_CLI_PR_TITLE=fix: existing")
+			if scenario == "attestation-failure" {
+				sctx.Env = append(sctx.Env, "FAKE_CLI_PR_EDIT_ERR=provider unavailable")
+			}
 			identityURL, identityBranch, identitySHA := remote, "destination", prior
 			switch scenario {
 			case "wrong-repository":
@@ -100,6 +108,9 @@ func TestReboundPublicationUpdatesOnlyExistingDestination(t *testing.T) {
 			}
 			sctx.Env = append(sctx.Env, "FAKE_CLI_PR_HEAD_IDENTITY_JSON="+fmt.Sprintf(`{"head":{"repo":{"clone_url":%q},"ref":%q,"sha":%q}}`, identityURL, identityBranch, identitySHA))
 			_, err := (&PushStep{}).Execute(sctx)
+			if scenario == "attestation-failure" && (err == nil || !strings.Contains(err.Error(), "pipeline attestation write failed")) {
+				t.Fatalf("expected attestation failure, got %v", err)
+			}
 			if scenario != "fast-forward" {
 				if err == nil {
 					t.Fatal("unsafe publication accepted")

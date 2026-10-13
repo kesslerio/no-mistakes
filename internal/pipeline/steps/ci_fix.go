@@ -807,7 +807,7 @@ func attestHeadBeforePush(sctx *pipeline.StepContext, headSHA string, steps []*d
 		return nil
 	}
 	branch := strings.TrimPrefix(sctx.Run.PublicationBranch(), "refs/heads/")
-	if branch == effectivePRBaseBranch(sctx) {
+	if sctx.Run.Publication == nil && branch == effectivePRBaseBranch(sctx) {
 		return nil
 	}
 	host, reason := buildHost(sctx, provider)

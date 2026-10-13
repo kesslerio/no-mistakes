@@ -402,7 +402,7 @@ func (m *RunManager) validateCustodySuccessor(ctx context.Context, p ipc.Custody
 		if run.PRBaseBranch != nil {
 			baseOverride = *run.PRBaseBranch
 		}
-		id, err := m.startRunWithIntentSourceLocked(ctx, repo, p.Branch, p.Head, run.BaseSHA, "rerun", nil, intent, source, "", "", "", baseOverride, run.OmitIntent, run.Publication.PRURL, "", nil)
+		id, err := m.startRunWithIntentSourceLocked(ctx, repo, p.Branch, p.Head, run.BaseSHA, "rerun", nil, intent, source, "", "", "", baseOverride, run.OmitIntent, run.Publication.PRURL, run.Publication, "", nil)
 		if err != nil {
 			return "", err
 		}
