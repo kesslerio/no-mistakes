@@ -722,3 +722,60 @@ no-mistakes daemon status
 ```
 
 Shows the PID if the daemon is running.
+
+### Explicit custody handoffs
+
+`no-mistakes custody` and `no-mistakes axi custody` operate on the current
+repository branch and its latest run. They require the daemon and refuse
+recursive use from pipeline agents. They do not accept a run selector.
+
+- `custody release` verifies the run's exact recorded, still-open PR and its
+  existing publication branch. The managed head must equal the published head.
+  It stops the executor, archives verified heads before moving the source gate
+  ref, and records custody returned. It never substitutes a replacement PR.
+- `custody rebind --branch <existing-branch> --pr <exact-open-PR-URL>` stops the
+  executor and records a destination for subsequent full validation. The
+  destination head must be an ancestor of the preserved managed head. It reports
+  `rerun-required`; it does not publish, transfer approvals, or retain a pending
+  gate. Its `next_command` selects the exact archived head for validation.
+  Skipping validation is refused.
+- `custody validate --head <exact-archived-head>` starts a full successor run
+  from the pending rebind, leaving the operator worktree untouched. Both the
+  archive and source gate must still match that SHA, and the original run must
+  still be the latest run on the source branch. It reports `validation-started`,
+  never publication success; attach with `no-mistakes axi run`. Ordinary `rerun`
+  retains its refusal when a clean local head differs from the selected head.
+- `custody reconcile` applies the release proof to a failed run whose recorded
+  error is exactly `daemon shutting down` or `daemon crashed during execution`.
+  It returns custody without erasing the historical error or fabricating a
+  successful push. New CI-monitor interruptions continue to use the existing
+  startup recovery behavior.
+
+These commands currently require a provider that can supply exact live PR-head
+proof of the head repository, branch, and SHA (GitHub supports this).
+Unsupported or unavailable proof fails closed.
+They never create a remote branch, rewrite published history, or approve a run.
+A successor uses the existing destination PR, merges base updates rather than
+rebasing published history, and refuses a missing or replaced PR. Publication
+binding and PR identity travel together from the explicitly selected predecessor
+to its successor and reruns, including a run selected in the TUI; unrelated fresh
+launches inherit neither. Its push must
+be a fast-forward or an exact no-op. A fast-forward uses an explicit expected-ref
+lease after proving ancestry so a concurrent deletion cannot recreate the branch.
+The [pre-push attestation contract](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation) applies to the bound existing PR regardless of the configured base.
+
+Handoffs refuse the default branch as either source or destination. They also
+check the outstanding terminal custody stack using the same eligibility rules
+as guarded recovery: each outstanding head must be contained in the handoff
+head and archived before custody is returned. Already superseded published
+history does not block a handoff.
+
+Dirty managed worktrees, missing commits, occupied destinations, changed PR or
+remote evidence, and conflicting preservation refs refuse. Work arriving during
+quiescence remains in the retained managed worktree; inspect it before retrying.
+Worktree retention and restart handling are owned by
+[Daemon & Worktrees](/no-mistakes/concepts/daemon/#what-it-does).
+Verified heads are preserved under
+`refs/no-mistakes/custody/<run>/<head>` in the gate. An interrupted handoff can
+therefore leave archives and a stopped run while refusing to return custody;
+those artifacts are preservation evidence, not publication or approval evidence.

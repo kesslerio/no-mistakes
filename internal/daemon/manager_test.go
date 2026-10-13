@@ -1508,7 +1508,7 @@ func TestProofLaunchFallbackReturnsReusedWhenObserverClaimsDuringSetup(t *testin
 	logLaunchEvidence(t, "observer-and-fallback", []ipc.LaunchReceipt{*first.Receipt, fresh.Receipt})
 }
 
-func TestProofLaunchFallbackInheritsOnlyLivePRIdentity(t *testing.T) {
+func TestProofLaunchFallbackDoesNotInheritPRIdentity(t *testing.T) {
 	for _, state := range []string{"", "open", "closed", "merged"} {
 		t.Run("state="+state, func(t *testing.T) {
 			p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
@@ -1557,13 +1557,10 @@ func TestProofLaunchFallbackInheritsOnlyLivePRIdentity(t *testing.T) {
 			if got.ID == prior.ID || got.Status != types.RunCompleted || got.PRBaseBranch == nil || *got.PRBaseBranch != "review/base" {
 				t.Fatalf("fresh retargeted run = %+v", got)
 			}
-			if state == "closed" || state == "merged" {
-				if got.PRURL != nil && *got.PRURL != "" {
-					t.Fatalf("inherited retired PR: %s", *got.PRURL)
-				}
-			} else if got.PRURL == nil || *got.PRURL != prURL {
-				t.Fatalf("lost existing PR identity: %+v", got)
+			if got.PRURL != nil && *got.PRURL != "" {
+				t.Fatalf("fresh launch inherited PR identity: %+v", got)
 			}
+
 			logLaunchEvidence(t, "persisted-pr-inheritance", map[string]any{
 				"prior_run_id": prior.ID, "prior_pr_state": state,
 				"new_run_id": got.ID, "pr_url": got.PRURL, "pr_base_branch": got.PRBaseBranch,

@@ -28,8 +28,11 @@ const forkBranchRefPrefix = "refs/remotes/no-mistakes-push/"
 
 func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	ctx := sctx.Ctx
-	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
-	defaultBranch := effectivePRBaseBranch(sctx)
+	branch := strings.TrimPrefix(sctx.Run.PublicationBranch(), "refs/heads/")
+	defaultBranch, err := resolvePublicationBaseBranch(sctx)
+	if err != nil {
+		return nil, err
+	}
 	branchTarget := ""
 	pushRemote := resolveUpstreamURL(sctx)
 	if branch != "" {
@@ -491,10 +494,11 @@ Instructions:
 }
 
 // mergesMovedBase reports whether this run integrates a moved base with a merge
-// commit instead of rebasing onto it. The value is resolved config
-// (rebase.strategy), trusted-only for a repository, and defaults to rebasing.
+// commit instead of rebasing onto it. A publication binding requires merging
+// to preserve published history; otherwise resolved config (rebase.strategy),
+// trusted-only for a repository, selects the shape and defaults to rebasing.
 func mergesMovedBase(sctx *pipeline.StepContext) bool {
-	return sctx.Config != nil && sctx.Config.Rebase.Strategy == config.RebaseStrategyMerge
+	return sctx.Config != nil && ((sctx.Run != nil && sctx.Run.Publication != nil) || sctx.Config.Rebase.Strategy == config.RebaseStrategyMerge)
 }
 
 // integrationVerb names the shape in log lines and findings, so a run reads as

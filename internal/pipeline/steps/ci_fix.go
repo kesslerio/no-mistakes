@@ -183,7 +183,7 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 	const maxLogBytes = 32 * 1024
 	var logOutput string
 	if host.Capabilities().FailedCheckLogs {
-		logOutput = fetchCILogOutput(ctx, host, pr, sctx.Run.Branch, sctx.Run.HeadSHA, targets.Checks, maxLogBytes)
+		logOutput = fetchCILogOutput(ctx, host, pr, sctx.Run.PublicationBranch(), sctx.Run.HeadSHA, targets.Checks, maxLogBytes)
 	}
 
 	// Build prompt based on what issues are present
@@ -202,6 +202,13 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 	default:
 		promptIntro = "The following CI checks have failed on this PR. Diagnose and fix the issues."
 		promptRules = ciFailingCheckFixRules
+	}
+
+	if mergeConflict && sctx.Run.Publication != nil {
+		promptIntro = strings.ReplaceAll(promptIntro, "rebase onto", "merge")
+		promptIntro = strings.ReplaceAll(promptIntro, "Rebase onto", "Merge")
+		promptRules = strings.ReplaceAll(promptRules, "rebase", "merge")
+		promptRules += "\n- Preserve the current branch history; resolve conflicts additively without rebasing or rewriting commits."
 	}
 
 	prompt := fmt.Sprintf(
@@ -226,8 +233,9 @@ Context:
 		mergeConflict,
 		promptRules,
 	)
+
 	if mergeConflict {
-		prompt += fmt.Sprintf("\n- rebase target commit: %s", rebaseBaseSHA)
+		prompt += fmt.Sprintf("\n- integration target commit: %s", rebaseBaseSHA)
 	}
 	if logOutput != "" {
 		prompt += fmt.Sprintf(`
@@ -798,8 +806,8 @@ func attestHeadBeforePush(sctx *pipeline.StepContext, headSHA string, steps []*d
 	if !supportsPRTemplates(provider) {
 		return nil
 	}
-	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
-	if branch == effectivePRBaseBranch(sctx) {
+	branch := strings.TrimPrefix(sctx.Run.PublicationBranch(), "refs/heads/")
+	if sctx.Run.Publication == nil && branch == effectivePRBaseBranch(sctx) {
 		return nil
 	}
 	host, reason := buildHost(sctx, provider)

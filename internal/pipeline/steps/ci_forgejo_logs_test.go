@@ -8,6 +8,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
 
@@ -108,16 +109,31 @@ func (h *targetedLogTestHost) FetchFailedCheckTargetLogs(_ context.Context, _ *s
 
 type forgejoLogTestHost struct {
 	scm.Host
-	logs  string
-	err   error
-	calls int
+	logs   string
+	err    error
+	calls  int
+	branch string
 }
 
 func (h *forgejoLogTestHost) Capabilities() scm.Capabilities {
 	return scm.Capabilities{FailedCheckLogs: true}
 }
 
-func (h *forgejoLogTestHost) FetchFailedCheckLogs(context.Context, *scm.PR, string, string, []string) (string, error) {
+func (h *forgejoLogTestHost) FetchFailedCheckLogs(_ context.Context, _ *scm.PR, branch, _ string, _ []string) (string, error) {
 	h.calls++
+	h.branch = branch
 	return h.logs, h.err
+}
+
+func TestCIFixRetrievesLogsFromPublicationBranch(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	sctx := newTestContext(t, &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) { return &agent.Result{}, nil }}, dir, base, head, config.Commands{})
+	sctx.Run.Publication = &db.PublicationBinding{Branch: "destination", SourceRun: "previous"}
+	host := &forgejoLogTestHost{}
+	if _, err := (&CIStep{}).autoFixCI(sctx, host, &scm.PR{Number: "42"}, ciTargetsFor([]string{"test"}, false)); err != nil {
+		t.Fatal(err)
+	}
+	if host.calls != 1 || host.branch != "destination" {
+		t.Fatalf("logs queried branch %q in %d calls", host.branch, host.calls)
+	}
 }

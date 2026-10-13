@@ -35,7 +35,7 @@ func RealGit() (string, error) {
 
 func gitLocations() []string {
 	if runtime.GOOS != "windows" {
-		return []string{"/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git"}
+		return []string{"/usr/bin/git", "/opt/homebrew/bin/git", "/usr/local/bin/git", "/run/current-system/sw/bin/git"}
 	}
 
 	locations := make([]string, 0, 8)

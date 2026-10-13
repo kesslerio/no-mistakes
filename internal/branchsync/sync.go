@@ -1828,7 +1828,7 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 		state.Safety = "blocked_closed"
 		return state, run, true
 	}
-	if ptr(run.PushRef) != "refs/heads/"+branch || ptr(run.PushTargetFingerprint) != TargetFingerprint(s.Repo.PushURL()) || ptr(run.PushTargetKind) != targetKind(s.Repo) {
+	if ptr(run.PushRef) != "refs/heads/"+run.PublicationBranch() || ptr(run.PushTargetFingerprint) != TargetFingerprint(s.Repo.PushURL()) || ptr(run.PushTargetKind) != targetKind(s.Repo) {
 		state.State = StateTargetChanged
 		state.Safety = "blocked_target_changed"
 		state.Error = "the configured push target or branch ref changed after the pipeline push"
@@ -2051,7 +2051,7 @@ func exactPushedBinding(repo *db.Repo, run *db.Run, branch string) bool {
 		run.LastPushedSHA != nil && run.HeadSHA == ptr(run.LastPushedSHA) &&
 		run.PushTargetKind != nil && ptr(run.PushTargetKind) == targetKind(repo) &&
 		run.PushTargetFingerprint != nil && ptr(run.PushTargetFingerprint) == TargetFingerprint(repo.PushURL()) &&
-		run.PushRef != nil && ptr(run.PushRef) == "refs/heads/"+branch &&
+		run.PushRef != nil && ptr(run.PushRef) == "refs/heads/"+run.PublicationBranch() &&
 		run.PushGeneration != nil
 }
 
@@ -2169,6 +2169,26 @@ func (proof recoverySourceProof) apply(state State) State {
 	return state
 }
 
+func (s *Service) OutstandingCustodyRuns(ctx context.Context, branch string, runs []*db.Run) []*db.Run {
+	var outstanding []*db.Run
+	var newerPushed *db.Run
+	for _, candidate := range runs {
+		if candidate.Branch != branch {
+			continue
+		}
+		if unpublishedPipelineHead(candidate) && s.supersededUnpublishedRun(ctx, candidate, newerPushed, branch) {
+			continue
+		}
+		if newerPushed == nil && exactPushedBinding(s.Repo, candidate, branch) {
+			newerPushed = candidate
+		}
+		if terminalRunStatus(candidate.Status) && unpublishedPipelineHead(candidate) {
+			outstanding = append(outstanding, candidate)
+		}
+	}
+	return outstanding
+}
+
 func (s *Service) missingHeadKeepLocalRuns(ctx context.Context, state *State, run *db.Run) ([]string, []string, bool, bool) {
 	if state == nil || run == nil {
 		return nil, nil, false, false
@@ -2192,20 +2212,7 @@ func (s *Service) missingHeadKeepLocalRuns(ctx context.Context, state *State, ru
 	var candidateHeads []string
 	anyMissing := false
 	allEligible := true
-	var newerPushed *db.Run
-	for _, candidate := range runs {
-		if candidate.Branch != state.Local.Branch {
-			continue
-		}
-		if unpublishedPipelineHead(candidate) && s.supersededUnpublishedRun(ctx, candidate, newerPushed, state.Local.Branch) {
-			continue
-		}
-		if newerPushed == nil && exactPushedBinding(s.Repo, candidate, state.Local.Branch) {
-			newerPushed = candidate
-		}
-		if !terminalRunStatus(candidate.Status) || !unpublishedPipelineHead(candidate) {
-			continue
-		}
+	for _, candidate := range s.OutstandingCustodyRuns(ctx, state.Local.Branch, runs) {
 		eligible := candidate.TerminalHeadVerifiedAt != nil && strings.TrimSpace(candidate.HeadSHA) != ""
 		missing := eligible && !objectExists(ctx, s.workDir(), candidate.HeadSHA) && !objectExists(ctx, gateDir, candidate.HeadSHA)
 		if eligible {

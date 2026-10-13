@@ -1551,3 +1551,38 @@ func (h *Host) GetReviewComments(ctx context.Context, pr *scm.PR) ([]scm.ReviewC
 	}
 	return comments, nil
 }
+
+func (h *Host) ReadPRHeadIdentity(ctx context.Context, pr *scm.PR) (scm.PRHeadIdentity, error) {
+	number := pr.Number
+	if number == "" {
+		parsed, err := parsePullRequestURL(pr.URL, h.host, h.repoSlug())
+		if err != nil {
+			return scm.PRHeadIdentity{}, err
+		}
+		number = strconv.Itoa(parsed)
+	}
+	if n, err := strconv.Atoi(number); err != nil || n <= 0 {
+		return scm.PRHeadIdentity{}, fmt.Errorf("invalid PR number")
+	}
+	args := []string{"api", "repos/" + h.repoSlug() + "/pulls/" + number}
+	if h.host != "" {
+		args = append(args, "--hostname", h.host)
+	}
+	out, err := h.cmd(ctx, "gh", args...).Output()
+	if err != nil {
+		return scm.PRHeadIdentity{}, fmt.Errorf("read PR head identity: %w", err)
+	}
+	var wire struct {
+		Head struct {
+			Ref  string
+			SHA  string
+			Repo struct {
+				CloneURL string `json:"clone_url"`
+			}
+		}
+	}
+	if err := json.Unmarshal(out, &wire); err != nil {
+		return scm.PRHeadIdentity{}, fmt.Errorf("decode PR head identity: %w", err)
+	}
+	return scm.PRHeadIdentity{RepositoryURL: wire.Head.Repo.CloneURL, Branch: wire.Head.Ref, SHA: wire.Head.SHA}, nil
+}

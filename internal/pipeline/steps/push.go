@@ -120,7 +120,8 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 // the ordinary Push step.
 func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate string, attestationSteps []*db.StepResult) error {
 	ctx := sctx.Ctx
-	ref := normalizedBranchRef(sctx.Run.Branch)
+	ref := normalizedBranchRef(sctx.Run.PublicationBranch())
+	mirrorRef := normalizedBranchRef(sctx.Run.Branch)
 	branch := strings.TrimPrefix(ref, "refs/heads/")
 
 	pushURL := resolvePushURL(sctx)
@@ -143,7 +144,7 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 	// until the upstream push is verified, because a refused or failed push is
 	// a designed outcome and a gate left with no branch ref would strand
 	// `rerun` and branch-sync recovery on a branch that never published.
-	mirrorPlan, err := planGateMirrorReconciliation(ctx, sctx, ref, branch, headBeingPushed)
+	mirrorPlan, err := planGateMirrorReconciliation(ctx, sctx, mirrorRef, strings.TrimPrefix(mirrorRef, "refs/heads/"), headBeingPushed)
 	if err != nil {
 		return err
 	}
@@ -162,6 +163,15 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 		return fmt.Errorf("push to %s: %w", pushTarget, err)
 	}
 
+	if sctx.Run.Publication != nil {
+		if _, err := verifyPublicationDestination(sctx); err != nil {
+			return err
+		}
+		if decision.newBranch || (!decision.fastForward && !decision.upToDate) {
+			return fmt.Errorf("rebound publication requires an existing branch and a non-forcing update")
+		}
+	}
+
 	// This protocol has single-publisher scope: the daemon's
 	// startRunWithIntentSourceLocked enforces one active run per repo branch, so
 	// coordination with independent authorized publishers is outside its scope.
@@ -170,6 +180,13 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 	}
 
 	switch {
+	case sctx.Run.Publication != nil && decision.fastForward:
+		// An explicit lease pins the existing ref after ancestry proved this
+		// update is fast-forward. It cannot authorize a rewrite here, and a
+		// concurrent deletion cannot turn this adoption into branch creation.
+		if err := stepGitPushCommit(sctx, pushURL, headBeingPushed, ref, decision.remoteSHA, true); err != nil {
+			return err
+		}
 	case decision.newBranch, decision.fastForward:
 		// A branch absent from the remote creates it, and an append-only update
 		// discards nothing by construction, so both are a plain push with no
@@ -211,7 +228,7 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 	// returning the error makes the CI monitor treat an already published
 	// repair as a failed one, and recording first and swallowing the error
 	// strands the gate behind the remote for good.
-	if err := updateGateMirrorAfterPush(ctx, sctx, ref, headBeingPushed, mirrorPlan); err != nil {
+	if err := updateGateMirrorAfterPush(ctx, sctx, mirrorRef, headBeingPushed, mirrorPlan); err != nil {
 		return err
 	}
 
