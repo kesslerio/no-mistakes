@@ -17,7 +17,9 @@ import (
 )
 
 func TestFreshSourcePublicationDoesNotRestampReboundPR(t *testing.T) {
-	remote := t.TempDir()
+	// Keep local remotes slash-separated for repository slug parsing, and pin
+	// the fake forge host below instead of interpreting a Windows drive as one.
+	remote := filepath.ToSlash(t.TempDir())
 	gitCmd(t, remote, "init", "--bare")
 	dir, base, prior := setupGitRepo(t)
 	gitCmd(t, dir, "remote", "add", "origin", remote)
@@ -27,7 +29,7 @@ func TestFreshSourcePublicationDoesNotRestampReboundPR(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
 	sctx.Repo.UpstreamURL = remote
 	sctx.Run.Branch = "feature"
-	sctx.ForgeContext = &forgecontext.Context{Provider: scm.ProviderGitHub}
+	sctx.ForgeContext = &forgecontext.Context{Provider: scm.ProviderGitHub, Host: "github.com"}
 	setupGateMirror(t, sctx)
 	recordReviewApproval(t, sctx, head)
 	body := filepath.Join(t.TempDir(), "body.md")
@@ -54,7 +56,7 @@ func TestFreshSourcePublicationDoesNotRestampReboundPR(t *testing.T) {
 func TestReboundPublicationUpdatesOnlyExistingDestination(t *testing.T) {
 	for _, scenario := range []string{"fast-forward", "attestation-failure", "missing", "diverged", "replacement", "wrong-repository", "wrong-branch", "wrong-sha"} {
 		t.Run(scenario, func(t *testing.T) {
-			remote := t.TempDir()
+			remote := filepath.ToSlash(t.TempDir())
 			gitCmd(t, remote, "init", "--bare")
 			dir, base, prior := setupGitRepo(t)
 			gitCmd(t, dir, "remote", "add", "origin", remote)
@@ -77,7 +79,7 @@ func TestReboundPublicationUpdatesOnlyExistingDestination(t *testing.T) {
 			sctx.Config.PR.BaseBranch = "destination"
 			url := "https://github.com/" + github.RepoSlug(remote) + "/pull/42"
 			sctx.Run.PRURL = &url
-			sctx.ForgeContext = &forgecontext.Context{Provider: scm.ProviderGitHub}
+			sctx.ForgeContext = &forgecontext.Context{Provider: scm.ProviderGitHub, Host: "github.com"}
 			sctx.Run.Publication = &db.PublicationBinding{Branch: "destination", PRURL: url, Target: branchsync.TargetFingerprint(sctx.Repo.UpstreamURL), SourceRun: "previous"}
 			setupGateMirror(t, sctx)
 			recordReviewApproval(t, sctx, head)
@@ -85,7 +87,7 @@ func TestReboundPublicationUpdatesOnlyExistingDestination(t *testing.T) {
 			if err := os.WriteFile(body, []byte(compliantPipelineBody(t, prior)), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			hook := "#!/bin/sh\nbody=$(cat '" + body + "')\ncase \"$body\" in *'" + head + "'*) exit 0;; *) exit 1;; esac\n"
+			hook := "#!/bin/sh\nbody=$(cat '" + filepath.ToSlash(body) + "')\ncase \"$body\" in *'" + head + "'*) exit 0;; *) exit 1;; esac\n"
 			if err := os.WriteFile(filepath.Join(remote, "hooks", "pre-receive"), []byte(hook), 0o755); err != nil {
 				t.Fatal(err)
 			}
@@ -150,7 +152,7 @@ func TestReboundPRBaseFollowsLiveBaseUnlessExplicit(t *testing.T) {
 		{"main", "release", "release"},
 	} {
 		t.Run(scenario.live+"/"+scenario.override, func(t *testing.T) {
-			remote := t.TempDir()
+			remote := filepath.ToSlash(t.TempDir())
 			gitCmd(t, remote, "init", "--bare")
 			dir, base, head := setupGitRepo(t)
 			gitCmd(t, dir, "remote", "add", "origin", remote)
@@ -158,7 +160,7 @@ func TestReboundPRBaseFollowsLiveBaseUnlessExplicit(t *testing.T) {
 			gitCmd(t, dir, "branch", "release", base)
 			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
 			sctx.Repo.UpstreamURL = remote
-			sctx.ForgeContext = &forgecontext.Context{Provider: scm.ProviderGitHub}
+			sctx.ForgeContext = &forgecontext.Context{Provider: scm.ProviderGitHub, Host: "github.com"}
 			url := "https://github.com/" + github.RepoSlug(remote) + "/pull/42"
 			sctx.Run.PRURL = &url
 			sctx.Run.Publication = &db.PublicationBinding{Branch: "destination", PRURL: url, Target: branchsync.TargetFingerprint(remote), SourceRun: "source"}
@@ -194,7 +196,7 @@ func TestReboundPRBaseFollowsLiveBaseUnlessExplicit(t *testing.T) {
 func TestReboundIntegrationFollowsChangedLiveBase(t *testing.T) {
 	for _, override := range []string{"", "main"} {
 		t.Run("override="+override, func(t *testing.T) {
-			remote := t.TempDir()
+			remote := filepath.ToSlash(t.TempDir())
 			gitCmd(t, remote, "init", "--bare")
 			dir, base, head := setupGitRepo(t)
 			gitCmd(t, dir, "remote", "add", "origin", remote)
@@ -218,7 +220,7 @@ func TestReboundIntegrationFollowsChangedLiveBase(t *testing.T) {
 			gitCmd(t, dir, "checkout", "feature")
 			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
 			sctx.Repo.UpstreamURL = remote
-			sctx.ForgeContext = &forgecontext.Context{Provider: scm.ProviderGitHub}
+			sctx.ForgeContext = &forgecontext.Context{Provider: scm.ProviderGitHub, Host: "github.com"}
 			url := "https://github.com/" + github.RepoSlug(remote) + "/pull/42"
 			sctx.Run.PRURL = &url
 			sctx.Run.Publication = &db.PublicationBinding{Branch: "destination", PRURL: url, Target: branchsync.TargetFingerprint(remote), SourceRun: "source"}
