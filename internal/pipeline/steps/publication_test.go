@@ -1,11 +1,13 @@
 package steps
 
 import (
+	"context"
 	"fmt"
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/forgecontext"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/scm/github"
 	"os"
@@ -148,7 +150,7 @@ func TestReboundPRBaseFollowsLiveBaseUnlessExplicit(t *testing.T) {
 			sctx.ForgeContext = &forgecontext.Context{Provider: scm.ProviderGitHub}
 			url := "https://github.com/" + github.RepoSlug(remote) + "/pull/42"
 			sctx.Run.PRURL = &url
-			sctx.Run.Publication = &db.PublicationBinding{Branch: "destination", PRURL: url, Target: branchsync.TargetFingerprint(remote), BaseBranch: "main", SourceRun: "source"}
+			sctx.Run.Publication = &db.PublicationBinding{Branch: "destination", PRURL: url, Target: branchsync.TargetFingerprint(remote), SourceRun: "source"}
 			if scenario.override != "" {
 				sctx.Run.PRBaseBranch = &scenario.override
 			}
@@ -173,6 +175,68 @@ func TestReboundPRBaseFollowsLiveBaseUnlessExplicit(t *testing.T) {
 			}
 			if scenario.override != "" && !strings.Contains(string(data), "--base "+scenario.expected) {
 				t.Fatalf("explicit base not applied: %s", data)
+			}
+		})
+	}
+}
+
+func TestReboundIntegrationFollowsChangedLiveBase(t *testing.T) {
+	for _, override := range []string{"", "main"} {
+		t.Run("override="+override, func(t *testing.T) {
+			remote := t.TempDir()
+			gitCmd(t, remote, "init", "--bare")
+			dir, base, head := setupGitRepo(t)
+			gitCmd(t, dir, "remote", "add", "origin", remote)
+			gitCmd(t, dir, "push", "origin", "main", "feature:destination")
+			gitCmd(t, dir, "checkout", "main")
+			if err := os.WriteFile(filepath.Join(dir, "main-only.txt"), []byte("main-only"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, dir, "add", ".")
+			gitCmd(t, dir, "commit", "-m", "main-only")
+			mainHead := gitCmd(t, dir, "rev-parse", "HEAD")
+			gitCmd(t, dir, "push", "origin", "main")
+			gitCmd(t, dir, "checkout", "-b", "release", base)
+			if err := os.WriteFile(filepath.Join(dir, "release-only.txt"), []byte("release-only"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, dir, "add", ".")
+			gitCmd(t, dir, "commit", "-m", "release-only")
+			releaseHead := gitCmd(t, dir, "rev-parse", "HEAD")
+			gitCmd(t, dir, "push", "origin", "release")
+			gitCmd(t, dir, "checkout", "feature")
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+			sctx.Repo.UpstreamURL = remote
+			sctx.ForgeContext = &forgecontext.Context{Provider: scm.ProviderGitHub}
+			url := "https://github.com/" + github.RepoSlug(remote) + "/pull/42"
+			sctx.Run.PRURL = &url
+			sctx.Run.Publication = &db.PublicationBinding{Branch: "destination", PRURL: url, Target: branchsync.TargetFingerprint(remote), SourceRun: "source"}
+			env := fakeCIGH(t, "OPEN", `[]`)
+			env = append(env, "FAKE_CLI_PR_HEAD_IDENTITY_JSON="+fmt.Sprintf(`{"head":{"repo":{"clone_url":%q},"ref":"destination","sha":%q}}`, remote, head))
+			sctx.Env = append(append([]string{}, env...), "FAKE_CLI_PR_LIST_JSON="+fmt.Sprintf(`[{"number":42,"url":%q,"baseRefName":"main"}]`, url))
+			if _, err := verifyPublicationDestination(sctx); err != nil {
+				t.Fatal(err)
+			}
+			sctx.Env = append(append([]string{}, env...), "FAKE_CLI_PR_LIST_JSON="+fmt.Sprintf(`[{"number":42,"url":%q,"baseRefName":"release"}]`, url))
+			if override != "" {
+				sctx.Run.PRBaseBranch = &override
+			}
+			if _, err := (&RebaseStep{}).Execute(sctx); err != nil {
+				t.Fatal(err)
+			}
+			after := gitCmd(t, dir, "rev-parse", "HEAD")
+			wanted, excluded := releaseHead, mainHead
+			if override == "main" {
+				wanted, excluded = mainHead, releaseHead
+			}
+			if _, err := git.Run(context.Background(), dir, "merge-base", "--is-ancestor", wanted, after); err != nil {
+				t.Fatal("selected base was not integrated", err)
+			}
+			if _, err := git.Run(context.Background(), dir, "merge-base", "--is-ancestor", excluded, after); err == nil {
+				t.Fatal("unselected base entered publication history")
+			}
+			if _, err := git.Run(context.Background(), dir, "merge-base", "--is-ancestor", head, after); err != nil {
+				t.Fatal("publication history was rewritten")
 			}
 		})
 	}

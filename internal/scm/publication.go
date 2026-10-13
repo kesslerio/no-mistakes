@@ -27,7 +27,7 @@ func VerifyPRHeadIdentity(ctx context.Context, host Host, pr *PR, target, branch
 	}
 	path := strings.TrimSuffix(RepoPath(target), ".git")
 	actual := strings.TrimSuffix(RepoPath(identity.RepositoryURL), ".git")
-	if identity.RepositoryURL == "" || path == "" || actual != path || !strings.EqualFold(ExtractHost(identity.RepositoryURL), ExtractHost(target)) || identity.Branch != branch || sha == "" || identity.SHA != sha {
+	if identity.RepositoryURL == "" || path == "" || actual != path || !strings.EqualFold(ResolveHost(ctx, identity.RepositoryURL), ResolveHost(ctx, target)) || identity.Branch != branch || sha == "" || identity.SHA != sha {
 		return fmt.Errorf("PR head repository, branch, and commit do not match the publication destination")
 	}
 	return nil

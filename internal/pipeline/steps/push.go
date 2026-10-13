@@ -164,7 +164,7 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 	}
 
 	if sctx.Run.Publication != nil {
-		if err := verifyPublicationDestination(sctx); err != nil {
+		if _, err := verifyPublicationDestination(sctx); err != nil {
 			return err
 		}
 		if decision.newBranch || (!decision.fastForward && !decision.upToDate) {

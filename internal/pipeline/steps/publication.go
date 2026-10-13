@@ -18,37 +18,54 @@ func PublicationHost(sctx *pipeline.StepContext) (scm.Host, error) {
 	}
 	return host, nil
 }
-func verifyPublicationDestination(sctx *pipeline.StepContext) error {
+func verifyPublicationDestination(sctx *pipeline.StepContext) (*scm.PR, error) {
 	p := sctx.Run.Publication
 	if p == nil {
-		return nil
+		return nil, nil
 	}
 	if branchsync.TargetFingerprint(sctx.Repo.PushURL()) != p.Target || branchsync.TargetFingerprint(resolvePushURL(sctx)) != p.Target {
-		return fmt.Errorf("rebound publication target changed")
+		return nil, fmt.Errorf("rebound publication target changed")
 	}
 	host, err := PublicationHost(sctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	pr, err := host.FindPR(sctx.Ctx, p.Branch, "")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if pr == nil || pr.URL != p.PRURL {
-		return fmt.Errorf("rebound destination PR is absent or replaced")
+		return nil, fmt.Errorf("rebound destination PR is absent or replaced")
 	}
 	state, err := host.GetPRState(sctx.Ctx, pr)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if state != scm.PRStateOpen {
-		return fmt.Errorf("rebound destination PR is not open")
+		return nil, fmt.Errorf("rebound destination PR is not open")
 	}
 	ctx, cancel := context.WithTimeout(sctx.Ctx, config.DefaultBranchSyncRemoteTimeout)
 	defer cancel()
 	head, err := git.LsRemote(ctx, sctx.WorkDir, resolvePushURL(sctx), "refs/heads/"+p.Branch)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return scm.VerifyPRHeadIdentity(ctx, host, pr, sctx.Repo.PushURL(), p.Branch, head)
+	if err := scm.VerifyPRHeadIdentity(ctx, host, pr, sctx.Repo.PushURL(), p.Branch, head); err != nil {
+		return nil, err
+	}
+	return pr, nil
+}
+
+func resolvePublicationBaseBranch(sctx *pipeline.StepContext) (string, error) {
+	if sctx.Run.Publication == nil || runPRBaseBranch(sctx) != "" {
+		return effectivePRBaseBranch(sctx), nil
+	}
+	pr, err := verifyPublicationDestination(sctx)
+	if err != nil {
+		return "", err
+	}
+	if pr.BaseBranch == "" {
+		return "", fmt.Errorf("rebound PR has no live base branch")
+	}
+	return ValidateRunPRBaseBranchName(pr.BaseBranch)
 }

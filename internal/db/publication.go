@@ -10,11 +10,10 @@ import (
 // PublicationBinding is an operator-selected existing destination, never
 // evidence that the run published a commit or earned approval there.
 type PublicationBinding struct {
-	Branch     string `json:"branch"`
-	PRURL      string `json:"pr_url"`
-	Target     string `json:"target"`
-	BaseBranch string `json:"base_branch"`
-	SourceRun  string `json:"source_run"`
+	Branch    string `json:"branch"`
+	PRURL     string `json:"pr_url"`
+	Target    string `json:"target"`
+	SourceRun string `json:"source_run"`
 }
 
 func (p *PublicationBinding) Scan(v any) error {

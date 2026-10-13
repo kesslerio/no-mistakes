@@ -118,36 +118,36 @@ func (m *RunManager) custodyLocked(ctx context.Context, p ipc.CustodyParams) (*i
 	if expectedPR == "" {
 		return nil, fmt.Errorf("an exact destination PR URL is required")
 	}
-	verify := func() (string, string, error) {
+	verify := func() (string, error) {
 		pr, e := host.FindPR(ctx, destination, "")
 		if e != nil {
-			return "", "", e
+			return "", e
 		}
 		if pr == nil || pr.URL != expectedPR {
-			return "", "", fmt.Errorf("existing destination PR is absent or replaced")
+			return "", fmt.Errorf("existing destination PR is absent or replaced")
 		}
 		state, e := host.GetPRState(ctx, pr)
 		if e != nil {
-			return "", "", e
+			return "", e
 		}
 		if state != "OPEN" {
-			return "", "", fmt.Errorf("destination PR is not open")
+			return "", fmt.Errorf("destination PR is not open")
 		}
 		remoteCtx, cancel := context.WithTimeout(ctx, config.DefaultBranchSyncRemoteTimeout)
 		defer cancel()
 		head, e := git.LsRemote(remoteCtx, gate, pushURL, "refs/heads/"+destination)
 		if e != nil {
-			return "", "", e
+			return "", e
 		}
 		if head == "" {
-			return "", "", fmt.Errorf("destination branch does not exist")
+			return "", fmt.Errorf("destination branch does not exist")
 		}
 		if e := scm.VerifyPRHeadIdentity(ctx, host, pr, repo.PushURL(), destination, head); e != nil {
-			return "", "", e
+			return "", e
 		}
-		return head, pr.BaseBranch, nil
+		return head, nil
 	}
-	live, base, err := verify()
+	live, err := verify()
 	if err != nil {
 		return nil, err
 	}
@@ -275,11 +275,11 @@ func (m *RunManager) custodyLocked(ctx context.Context, p ipc.CustodyParams) (*i
 	if err := checkHead(head); err != nil {
 		return nil, err
 	}
-	again, againBase, err := verify()
+	again, err := verify()
 	if err != nil {
 		return nil, err
 	}
-	if again != live || againBase != base {
+	if again != live {
 		return nil, fmt.Errorf("destination changed during quiescence")
 	}
 	currentRepo, err := m.db.GetRepo(repo.ID)
@@ -339,7 +339,7 @@ func (m *RunManager) custodyLocked(ctx context.Context, p ipc.CustodyParams) (*i
 	}
 	var binding *db.PublicationBinding
 	if p.Action == "rebind" {
-		binding = &db.PublicationBinding{Branch: destination, PRURL: expectedPR, Target: branchsync.TargetFingerprint(repo.PushURL()), BaseBranch: base, SourceRun: run.ID}
+		binding = &db.PublicationBinding{Branch: destination, PRURL: expectedPR, Target: branchsync.TargetFingerprint(repo.PushURL()), SourceRun: run.ID}
 	}
 	if err := m.db.FinishCustody(run, binding, settled...); err != nil {
 		_, rollback := git.Run(context.WithoutCancel(ctx), gate, "update-ref", "--no-deref", ref, old, head)

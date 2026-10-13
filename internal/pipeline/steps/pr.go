@@ -75,7 +75,10 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	if strings.HasPrefix(branch, "refs/heads/") {
 		branch = strings.TrimPrefix(branch, "refs/heads/")
 	}
-	baseBranch := effectivePRBaseBranch(sctx)
+	baseBranch, err := resolvePublicationBaseBranch(sctx)
+	if err != nil {
+		return nil, err
+	}
 	if branch == baseBranch {
 		sctx.Log(fmt.Sprintf("skipping PR creation on base branch %s", branch))
 		return &pipeline.StepOutcome{Skipped: true}, nil
@@ -115,7 +118,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return nil, err
 	}
 	if sctx.Run.Publication != nil {
-		if err := verifyPublicationDestination(sctx); err != nil {
+		if _, err := verifyPublicationDestination(sctx); err != nil {
 			return nil, err
 		}
 	}

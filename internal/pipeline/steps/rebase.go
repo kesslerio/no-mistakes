@@ -29,7 +29,10 @@ const forkBranchRefPrefix = "refs/remotes/no-mistakes-push/"
 func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	ctx := sctx.Ctx
 	branch := strings.TrimPrefix(sctx.Run.PublicationBranch(), "refs/heads/")
-	defaultBranch := effectivePRBaseBranch(sctx)
+	defaultBranch, err := resolvePublicationBaseBranch(sctx)
+	if err != nil {
+		return nil, err
+	}
 	branchTarget := ""
 	pushRemote := resolveUpstreamURL(sctx)
 	if branch != "" {
